@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GDS Viewer</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html, body {
+        width: 100%;
+        height: 100%;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #f5f5f5;
+        color: #333;
+      }
+      .app {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+      header {
+        padding: 12px 20px;
+        background: #fff;
+        border-bottom: 1px solid #ddd;
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+      header h1 {
+        font-size: 18px;
+        font-weight: 600;
+      }
+      .header-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .upload-btn {
+        padding: 8px 16px;
+        background: #4a4a8a;
+        border: none;
+        border-radius: 6px;
+        color: #fff;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .upload-btn:hover {
+        background: #5a5a9a;
+      }
+      #file-input,
+      #lyp-input {
+        display: none;
+      }
+      .main-content {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+      }
+      .sidebar {
+        width: 280px;
+        background: #fff;
+        border-right: 1px solid #ddd;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .sidebar-header {
+        padding: 12px 16px;
+        border-bottom: 1px solid #eee;
+        font-weight: 600;
+        font-size: 14px;
+        color: #666;
+        background: #fafafa;
+      }
+      .file-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px 0;
+      }
+      .file-item {
+        padding: 10px 16px;
+        cursor: pointer;
+        font-size: 13px;
+        border-left: 3px solid transparent;
+        transition: all 0.15s ease;
+        word-break: break-word;
+      }
+      .file-item:hover {
+        background: #f0f0f5;
+      }
+      .file-item.active {
+        background: #e8e8f0;
+        border-left-color: #4a4a8a;
+        font-weight: 500;
+      }
+      .file-item.loading {
+        opacity: 0.6;
+        pointer-events: none;
+      }
+      .viewer-container {
+        flex: 1;
+        position: relative;
+      }
+      gds-viewer {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .drop-zone {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(74, 74, 138, 0.2);
+        border: 3px dashed #4a4a8a;
+        border-radius: 12px;
+        margin: 20px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+      }
+      .drop-zone.active {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .drop-zone p {
+        font-size: 20px;
+        color: #4a4a8a;
+      }
+      .loading-indicator {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(255,255,255,0.95);
+        padding: 20px 28px;
+        border-radius: 8px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        font-size: 14px;
+        color: #666;
+        display: none;
+        text-align: center;
+        min-width: 200px;
+      }
+      .loading-indicator.active {
+        display: block;
+      }
+      .loading-indicator .spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid #e0e0e0;
+        border-top-color: #4a4a8a;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin: 0 auto 12px;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>GDS Viewer</h1>
+        <div class="header-controls">
+          <label class="upload-btn">
+            Open GDS File
+            <input type="file" id="file-input" accept=".gds,.gdsii" />
+          </label>
+          <label class="upload-btn" style="background:#3a6a3a;">
+            Open LYP File
+            <input type="file" id="lyp-input" accept=".lyp" />
+          </label>
+        </div>
+      </header>
+      <div class="main-content">
+        <div class="sidebar">
+          <div class="sidebar-header">Sample GDS Files</div>
+          <div class="file-list" id="file-list">
+            <div class="file-item" style="color: #999; font-style: italic;">Loading...</div>
+          </div>
+        </div>
+        <div class="viewer-container">
+          <gds-viewer id="viewer"></gds-viewer>
+          <div class="drop-zone" id="drop-zone">
+            <p>Drop GDS file here</p>
+          </div>
+          <div class="loading-indicator" id="loading-indicator">
+            <div class="spinner"></div>
+            <div id="loading-text">Loading GDS file...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import "./src/index.ts";
+
+      const viewer = document.getElementById("viewer");
+      const fileInput = document.getElementById("file-input");
+      const lypInput = document.getElementById("lyp-input");
+      const dropZone = document.getElementById("drop-zone");
+      const container = document.querySelector(".viewer-container");
+      const fileList = document.getElementById("file-list");
+      const loadingIndicator = document.getElementById("loading-indicator");
+      const sidebar = document.querySelector(".sidebar");
+
+      function hideSidebar() {
+        sidebar.style.display = "none";
+      }
+
+      // GitHub raw content base URLs
+      const GITHUB_RAW_BASE = "/samples";
+      const GDS_API_URL = "/samples/gds/index.json";
+      const LYP_URL = `${GITHUB_RAW_BASE}/klayout/layers.lyp`;
+
+      let gdsFiles = [];
+      let currentFile = null;
+      let lypLoaded = false;
+
+      // Load LYP file once at startup
+      async function loadDefaultLyp() {
+        try {
+          const response = await fetch(LYP_URL);
+          if (!response.ok) throw new Error("Failed to fetch LYP");
+          const text = await response.text();
+          await viewer.loadLypFromString(text);
+          lypLoaded = true;
+        } catch (err) {
+          console.warn("Could not load default LYP:", err);
+        }
+      }
+
+      // Fetch list of GDS files from GitHub
+      async function fetchGdsFileList() {
+        try {
+          const response = await fetch(GDS_API_URL);
+          if (!response.ok) throw new Error("Failed to fetch file list");
+          const files = await response.json();
+          gdsFiles = files
+            .filter(f => f.name.endsWith(".gds"))
+            .map(f => ({
+              name: f.name,
+              url: f.download_url
+            }));
+          renderFileList();
+        } catch (err) {
+          fileList.innerHTML = `<div class="file-item" style="color: #c00;">Failed to load file list</div>`;
+          console.error("Error fetching GDS file list:", err);
+        }
+      }
+
+      // Render the file list in sidebar
+      function renderFileList() {
+        fileList.innerHTML = gdsFiles.map((file, idx) => `
+          <div class="file-item" data-idx="${idx}" title="${file.name}">
+            ${file.name.replace(".gds", "")}
+          </div>
+        `).join("");
+
+        // Add click handlers
+        fileList.querySelectorAll(".file-item").forEach(item => {
+          item.addEventListener("click", () => {
+            const idx = parseInt(item.dataset.idx, 10);
+            loadGdsFromUrl(gdsFiles[idx]);
+          });
+        });
+      }
+
+      // Load a GDS file from URL
+      async function loadGdsFromUrl(file) {
+        if (currentFile === file.url) return;
+
+        // Update UI
+        fileList.querySelectorAll(".file-item").forEach(el => {
+          el.classList.remove("active", "loading");
+        });
+        const activeItem = fileList.querySelector(`[data-idx="${gdsFiles.indexOf(file)}"]`);
+        if (activeItem) {
+          activeItem.classList.add("active", "loading");
+        }
+        loadingIndicator.classList.add("active");
+
+        try {
+          const response = await fetch(file.url);
+          if (!response.ok) throw new Error("Failed to fetch GDS file");
+          const arrayBuffer = await response.arrayBuffer();
+          await viewer.loadGdsFromArrayBuffer(arrayBuffer, file.name);
+          currentFile = file.url;
+        } catch (err) {
+          console.error("Error loading GDS file:", err);
+          alert(`Failed to load ${file.name}`);
+        } finally {
+          loadingIndicator.classList.remove("active");
+          if (activeItem) {
+            activeItem.classList.remove("loading");
+          }
+        }
+      }
+
+      // Initialize
+      loadDefaultLyp();
+      fetchGdsFileList();
+
+      // Local file handlers (keep existing functionality)
+      lypInput.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          loadingIndicator.classList.add("active");
+          try {
+            await viewer.loadLypFile(file);
+            lypLoaded = true;
+          } finally {
+            loadingIndicator.classList.remove("active");
+          }
+        }
+      });
+
+      fileInput.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          hideSidebar();
+          currentFile = null;
+          loadingIndicator.classList.add("active");
+          try {
+            await viewer.loadGdsFile(file);
+          } finally {
+            loadingIndicator.classList.remove("active");
+          }
+        }
+      });
+
+      container.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("active");
+      });
+
+      container.addEventListener("dragleave", (e) => {
+        if (!container.contains(e.relatedTarget)) {
+          dropZone.classList.remove("active");
+        }
+      });
+
+      container.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("active");
+        const file = e.dataTransfer.files[0];
+        if (file && (file.name.endsWith(".gds") || file.name.endsWith(".gdsii"))) {
+          hideSidebar();
+          currentFile = null;
+          loadingIndicator.classList.add("active");
+          try {
+            await viewer.loadGdsFile(file);
+          } finally {
+            loadingIndicator.classList.remove("active");
+          }
+        }
+      });
+    </script>
+  </body>
+</html>
