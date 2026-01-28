@@ -267,11 +267,11 @@ bun run typecheck
 
 ## Browser Support
 
-- Chrome/Edge 113+ (WebGPU)
-- Firefox 130+ (WebGPU, behind flag)
-- Safari 17+ (WebGPU)
+Requires WebGPU:
 
-Falls back to WebGL2 on unsupported browsers.
+- Chrome/Edge 113+
+- Safari 17+
+- Firefox 139+ (behind `dom.webgpu.enabled` flag)
 
 ## License
 

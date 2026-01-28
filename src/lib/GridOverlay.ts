@@ -2,25 +2,41 @@ import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 import {
   Fn,
-  vec2,
   vec4,
-  float,
   uniform,
   positionWorld,
   cameraPosition,
   floor,
-  fract,
-  abs,
-  length,
   mix,
-  clamp,
-  smoothstep,
-  dFdx,
-  dFdy,
+  wgslFn,
   Discard,
   If,
-  max,
 } from "three/tsl";
+
+// Ben Golus's "Pristine Grid" algorithm: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
+const pristineGridWGSL = wgslFn(/* wgsl */ `
+  fn pristineGrid(uv: vec2f, lineWidth: f32, gridDiv: f32) -> f32 {
+    let div = max(0.1, gridDiv);
+    let uvScaled = uv / div;
+
+    let uvDDX = dpdx(uvScaled);
+    let uvDDY = dpdy(uvScaled);
+    let uvDeriv = vec2f(length(vec2f(uvDDX.x, uvDDY.x)), length(vec2f(uvDDX.y, uvDDY.y)));
+
+    let scaledLineWidth = lineWidth / div;
+    let targetWidth = vec2f(clamp(scaledLineWidth, 0.0, 0.5));
+    let drawWidth = clamp(targetWidth, uvDeriv, vec2f(0.5));
+
+    let lineAA = uvDeriv * 1.5;
+    let gridUV = 1.0 - abs(fract(uvScaled) * 2.0 - 1.0);
+
+    var grid2 = smoothstep(drawWidth + lineAA, drawWidth - lineAA, gridUV);
+    grid2 = grid2 * clamp(targetWidth / drawWidth, vec2f(0.0), vec2f(1.0));
+    grid2 = mix(grid2, targetWidth, clamp(uvDeriv * 2.0 - 1.0, vec2f(0.0), vec2f(1.0)));
+
+    return mix(grid2.x, 1.0, grid2.y);
+  }
+`);
 
 export class GridOverlay {
   private mesh: THREE.Mesh;
@@ -31,8 +47,8 @@ export class GridOverlay {
   private uMajorGridFactor = uniform(10.0);
   private uMinorLineWidth = uniform(0.02);
   private uMajorLineWidth = uniform(0.04);
-  private uMinorLineColor = uniform(new THREE.Color(0x888888));
   private uMajorLineColor = uniform(new THREE.Color(0x666666));
+  private uMinorLineColor = uniform(new THREE.Color(0x888888));
   private uOpacity = uniform(0.4);
 
   constructor() {
@@ -41,48 +57,29 @@ export class GridOverlay {
       const majorGridFactor = this.uMajorGridFactor;
       const minorLineWidthU = this.uMinorLineWidth;
       const majorLineWidthU = this.uMajorLineWidth;
-      const minorLineColor = this.uMinorLineColor;
       const majorLineColor = this.uMajorLineColor;
+      const minorLineColor = this.uMinorLineColor;
       const opacity = this.uOpacity;
 
-      const division = scale.mul(majorGridFactor);
-      const cameraCenteringOffset = floor(cameraPosition.xy.div(division)).mul(division);
-      const worldPos = positionWorld.xy;
-      const vUv = worldPos.sub(cameraCenteringOffset);
-
-      const uvDDXY_x = dFdx(vUv);
-      const uvDDXY_y = dFdy(vUv);
-      const uvDeriv = vec2(
-        length(vec2(uvDDXY_x.x, uvDDXY_y.x)),
-        length(vec2(uvDDXY_x.y, uvDDXY_y.y))
-      );
-
       const majorGridSize = scale.mul(majorGridFactor);
-      const majorDiv = max(float(0.1), majorGridSize);
-      const majorUVDeriv = uvDeriv.div(majorDiv);
-      const majorLineWidth = majorLineWidthU.mul(scale).div(majorDiv);
-      const majorDrawWidth = clamp(vec2(majorLineWidth, majorLineWidth), majorUVDeriv, vec2(0.5, 0.5));
-      const majorLineAA = majorUVDeriv.mul(1.5);
-      const majorGridUV = float(1.0).sub(abs(fract(vUv.div(majorDiv)).mul(2.0).sub(1.0)));
-      const majorGrid2Raw = smoothstep(majorDrawWidth.add(majorLineAA), majorDrawWidth.sub(majorLineAA), majorGridUV);
-      const majorGrid2Scaled = majorGrid2Raw.mul(clamp(vec2(majorLineWidth, majorLineWidth).div(majorDrawWidth), vec2(0.0, 0.0), vec2(1.0, 1.0)));
-      const majorGrid2 = mix(majorGrid2Scaled, vec2(majorLineWidth, majorLineWidth), clamp(majorUVDeriv.mul(2.0).sub(1.0), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+      const cameraCenteringOffset = floor(cameraPosition.xy.div(majorGridSize)).mul(majorGridSize);
+      const worldPos = positionWorld.xy;
+      const uv = worldPos.sub(cameraCenteringOffset);
 
-      const minorDiv = max(float(0.1), scale);
-      const minorUVDeriv = uvDeriv.div(minorDiv);
-      const minorLineWidth = minorLineWidthU.mul(scale).div(minorDiv);
-      const minorDrawWidth = clamp(vec2(minorLineWidth, minorLineWidth), minorUVDeriv, vec2(0.5, 0.5));
-      const minorLineAA = minorUVDeriv.mul(1.5);
-      const minorGridUV = float(1.0).sub(abs(fract(vUv.div(minorDiv)).mul(2.0).sub(1.0)));
-      const minorGrid2Raw = smoothstep(minorDrawWidth.add(minorLineAA), minorDrawWidth.sub(minorLineAA), minorGridUV);
-      const minorGrid2Scaled = minorGrid2Raw.mul(clamp(vec2(minorLineWidth, minorLineWidth).div(minorDrawWidth), vec2(0.0, 0.0), vec2(1.0, 1.0)));
-      const minorGrid2 = mix(minorGrid2Scaled, vec2(minorLineWidth, minorLineWidth), clamp(minorUVDeriv.mul(2.0).sub(1.0), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+      const majorAlpha = pristineGridWGSL({
+        uv: uv,
+        lineWidth: majorLineWidthU.mul(scale),
+        gridDiv: majorGridSize,
+      });
 
-      const minorGrid = mix(minorGrid2.x, float(1.0), minorGrid2.y);
-      const majorGrid = mix(majorGrid2.x, float(1.0), majorGrid2.y);
+      const minorAlpha = pristineGridWGSL({
+        uv: uv,
+        lineWidth: minorLineWidthU.mul(scale),
+        gridDiv: scale,
+      });
 
-      const minorCol = vec4(minorLineColor, minorGrid);
-      const col = mix(minorCol, vec4(majorLineColor, 1.0), majorGrid);
+      const minorCol = vec4(minorLineColor, minorAlpha);
+      const col = mix(minorCol, vec4(majorLineColor, 1.0), majorAlpha);
       const finalAlpha = col.w.mul(opacity);
 
       If(finalAlpha.lessThan(0.01), () => {
