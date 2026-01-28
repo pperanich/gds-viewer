@@ -158,7 +158,7 @@ export class GdsViewer extends HTMLElement {
       canvas: this.canvas,
       antialias: true,
       logarithmicDepthBuffer: true,
-      forceWebGL: false,
+      forceWebGL: true,
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 

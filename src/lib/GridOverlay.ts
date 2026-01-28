@@ -2,42 +2,58 @@ import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 import {
   Fn,
+  vec2,
   vec4,
+  float,
   uniform,
   positionWorld,
   cameraPosition,
   floor,
+  fract,
+  abs,
+  length,
   mix,
-  wgslFn,
+  clamp,
+  smoothstep,
+  max,
+  dFdx,
+  dFdy,
   Discard,
   If,
-  max,
 } from "three/tsl";
 
 // Ben Golus's "Pristine Grid" algorithm: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
-const pristineGridWGSL = wgslFn(/* wgsl */ `
-  fn pristineGrid(uv: vec2f, lineWidthPx: f32, gridDiv: f32, pixelRatio: f32) -> f32 {
-    let div = max(0.0001, gridDiv);
-    let uvScaled = uv / div;
+const pristineGrid = Fn(
+  ([uv, lineWidthPx, gridDiv, pixelRatio]: [
+    ReturnType<typeof vec2>,
+    ReturnType<typeof float>,
+    ReturnType<typeof float>,
+    ReturnType<typeof float>,
+  ]) => {
+    const div = max(gridDiv, 0.0001);
+    const uvScaled = uv.div(div);
 
-    let uvDDX = dpdx(uvScaled);
-    let uvDDY = dpdy(uvScaled);
-    let uvDeriv = vec2f(length(vec2f(uvDDX.x, uvDDY.x)), length(vec2f(uvDDX.y, uvDDY.y)));
+    const uvDDX = dFdx(uvScaled);
+    const uvDDY = dFdy(uvScaled);
+    const uvDeriv = vec2(
+      length(vec2(uvDDX.x, uvDDY.x)),
+      length(vec2(uvDDX.y, uvDDY.y)),
+    );
 
-    let lineWidthScaled = pixelRatio * lineWidthPx * uvDeriv;
-    let targetWidth = clamp(lineWidthScaled, vec2f(0.0), vec2f(0.5));
-    let drawWidth = clamp(targetWidth, uvDeriv, vec2f(0.5));
+    const lineWidthScaled = uvDeriv.mul(pixelRatio).mul(lineWidthPx);
+    const targetWidth = clamp(lineWidthScaled, vec2(0.0), vec2(0.5));
+    const drawWidth = clamp(targetWidth, uvDeriv, vec2(0.5));
 
-    let lineAA = uvDeriv * 1.5;
-    let gridUV = 1.0 - abs(fract(uvScaled) * 2.0 - 1.0);
+    const lineAA = uvDeriv.mul(1.5);
+    const gridUV = float(1.0).sub(abs(fract(uvScaled).mul(2.0).sub(1.0)));
 
-    var grid2 = smoothstep(drawWidth + lineAA, drawWidth - lineAA, gridUV);
-    grid2 = grid2 * clamp(targetWidth / drawWidth, vec2f(0.0), vec2f(1.0));
-    grid2 = mix(grid2, targetWidth, clamp(uvDeriv * 2.0 - 1.0, vec2f(0.0), vec2f(1.0)));
+    const grid2Raw = smoothstep(drawWidth.add(lineAA), drawWidth.sub(lineAA), gridUV);
+    const grid2Scaled = grid2Raw.mul(clamp(targetWidth.div(drawWidth), vec2(0.0), vec2(1.0)));
+    const grid2 = mix(grid2Scaled, targetWidth, clamp(uvDeriv.mul(2.0).sub(1.0), vec2(0.0), vec2(1.0)));
 
-    return mix(grid2.x, 1.0, grid2.y);
-  }
-`);
+    return mix(grid2.x, float(1.0), grid2.y);
+  },
+);
 
 function createInfiniteGridGeometry(): THREE.BufferGeometry {
   // Near quad (unit size, will be scaled by shader/update) + far quad (200x larger)
@@ -114,20 +130,10 @@ export class GridOverlay {
       const worldPos = positionWorld.xy;
       const uv = worldPos.sub(cameraCenteringOffset);
 
-      const majorAlpha = pristineGridWGSL({
-        uv: uv,
-        lineWidthPx: majorLineWidthPx,
-        gridDiv: majorGridSize,
-        pixelRatio: pixelRatio,
-      });
+      const majorAlpha = pristineGrid(uv, majorLineWidthPx, majorGridSize, pixelRatio);
 
       const minorScale = max(scale, 0.0001);
-      const minorAlpha = pristineGridWGSL({
-        uv: uv,
-        lineWidthPx: minorLineWidthPx,
-        gridDiv: minorScale,
-        pixelRatio: pixelRatio,
-      });
+      const minorAlpha = pristineGrid(uv, minorLineWidthPx, minorScale, pixelRatio);
 
       const minorCol = vec4(minorLineColor, minorAlpha);
       const col = mix(minorCol, vec4(majorLineColor, 1.0), majorAlpha);
