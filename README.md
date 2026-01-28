@@ -6,15 +6,15 @@ A high-performance 3D GDS/GDSII file viewer built as a Web Component. Visualize 
 
 ## Features
 
-- 🎨 **3D & 2D Visualization** - Interactive 3D rendering with orthographic 2D mode
-- 📏 **Measurement Tools** - Precise distance measurements in 2D mode
-- 🎭 **Layer Management** - Toggle visibility, group by type, automatic layer classification
-- 🎨 **Layer Stack Support** - Import KLayout `.lyp` files or use custom layer configurations
-- ⚡ **Web Worker Parsing** - Non-blocking GDS file parsing for smooth UI
-- 🎯 **Smart Defaults** - Automatic layer classification for photonics and semiconductor designs
-- 📐 **Scale & Grid** - Dynamic scale ruler and grid overlay
-- 🌓 **Theme Support** - Light and dark modes with customizable CSS variables
-- 🔧 **Web Component** - Easy integration into any web application
+- **3D & 2D Visualization** - Interactive 3D rendering with orthographic 2D mode
+- **Measurement Tools** - Precise distance measurements in 2D mode
+- **Layer Management** - Toggle visibility, group by type, automatic layer classification
+- **Layer Stack Support** - Import KLayout `.lyp` files or use custom layer configurations
+- **Web Worker Parsing** - Non-blocking GDS file parsing for smooth UI
+- **Smart Defaults** - Automatic layer classification for photonics and semiconductor designs
+- **Scale & Grid** - Dynamic scale ruler and grid overlay
+- **Theme Support** - Light and dark modes with customizable CSS variables
+- **Web Component** - Easy integration into any web application
 
 ## Installation
 
@@ -30,7 +30,7 @@ bun add gds-viewer
 
 ### Direct Embedding (No Build Step)
 
-Download the latest `gds-viewer.js` from the [releases page](https://github.com/YOUR_USERNAME/gds-viewer/releases) and include it directly:
+Download the latest `gds-viewer.js` from the [releases page](https://github.com/pperanich/gds-viewer/releases) and include it directly:
 
 ```html
 <!DOCTYPE html>
@@ -40,10 +40,11 @@ Download the latest `gds-viewer.js` from the [releases page](https://github.com/
   </head>
   <body>
     <!-- Load from URL -->
-    <gds-viewer 
+    <gds-viewer
       gds-url="/path/to/design.gds"
       lyp-url="/path/to/layers.lyp"
-      style="width: 100%; height: 600px;">
+      style="width: 100%; height: 600px;"
+    >
     </gds-viewer>
   </body>
 </html>
@@ -56,14 +57,15 @@ Download the latest `gds-viewer.js` from the [releases page](https://github.com/
 <html>
   <head>
     <script type="module">
-      import 'gds-viewer';
+      import "gds-viewer";
     </script>
   </head>
   <body>
-    <gds-viewer 
+    <gds-viewer
       gds-url="/path/to/design.gds"
       lyp-url="/path/to/layers.lyp"
-      style="width: 100%; height: 600px;">
+      style="width: 100%; height: 600px;"
+    >
     </gds-viewer>
   </body>
 </html>
@@ -72,16 +74,16 @@ Download the latest `gds-viewer.js` from the [releases page](https://github.com/
 ### Programmatic Usage
 
 ```javascript
-import { GdsViewer } from 'gds-viewer';
+import { GdsViewer } from "gds-viewer";
 
-const viewer = document.querySelector('gds-viewer');
+const viewer = document.querySelector("gds-viewer");
 
 // Load GDS file
-const gdsFile = await fetch('/design.gds').then(r => r.arrayBuffer());
+const gdsFile = await fetch("/design.gds").then((r) => r.arrayBuffer());
 await viewer.loadGdsBuffer(gdsFile);
 
 // Load layer configuration (KLayout .lyp format)
-await viewer.loadLypFromUrl('/layers.lyp');
+await viewer.loadLypFromUrl("/layers.lyp");
 
 // Or use a custom layer stack
 viewer.setLayerStack({
@@ -93,11 +95,11 @@ viewer.setLayerStack({
       thickness: 0.22,
       zOffset: 0,
       color: "#ff6b6b",
-      material: { opacity: 0.8 }
-    }
+      material: { opacity: 0.8 },
+    },
   ],
   units: "um",
-  defaultThickness: 0.2
+  defaultThickness: 0.2,
 });
 
 // Access parsed document
@@ -109,11 +111,11 @@ console.log(doc.cells, doc.layers, doc.boundingBox);
 
 ### Web Component Attributes
 
-| Attribute | Description |
-|-----------|-------------|
-| `gds-url` | URL to GDS/GDSII file |
-| `lyp-url` | URL to KLayout layer properties file (.lyp) |
-| `layer-stack-url` | URL to JSON layer stack configuration |
+| Attribute         | Description                                 |
+| ----------------- | ------------------------------------------- |
+| `gds-url`         | URL to GDS/GDSII file                       |
+| `lyp-url`         | URL to KLayout layer properties file (.lyp) |
+| `layer-stack-url` | URL to JSON layer stack configuration       |
 
 ### Methods
 
@@ -165,8 +167,8 @@ import type {
   LayerStackConfig,
   LayerStackEntry,
   LayerType,
-  LayerClassification
-} from 'gds-viewer';
+  LayerClassification,
+} from "gds-viewer";
 ```
 
 ### Layer Stack Configuration
@@ -174,7 +176,7 @@ import type {
 ```typescript
 interface LayerStackConfig {
   layers: LayerStackEntry[];
-  units?: string;  // "nm" | "um" | "mm"
+  units?: string; // "nm" | "um" | "mm"
   defaultThickness: number;
 }
 
@@ -184,7 +186,7 @@ interface LayerStackEntry {
   name: string;
   thickness: number;
   zOffset: number;
-  color: string;  // hex color
+  color: string; // hex color
   material?: {
     opacity?: number;
     metallic?: boolean;
@@ -201,7 +203,7 @@ gds-viewer {
   /* Background colors */
   --gds-bg-light: #f0f0f0;
   --gds-bg-dark: #121212;
-  
+
   /* Panel styling */
   --gds-panel-bg: rgba(30, 30, 30, 0.9);
   --gds-panel-text: #ffffff;
@@ -209,23 +211,23 @@ gds-viewer {
   --gds-panel-font-size: 13px;
   --gds-panel-radius: 8px;
   --gds-panel-padding: 12px;
-  
+
   /* Button styling */
   --gds-button-bg: #e0e0e0;
   --gds-button-bg-active: #4a4a8a;
   --gds-button-text: #333333;
   --gds-button-text-active: #ffffff;
-  
+
   /* Ruler styling */
   --gds-ruler-color-light: #333333;
   --gds-ruler-color-dark: #ffffff;
   --gds-ruler-font-size: 12px;
-  
+
   /* Grid styling */
   --gds-grid-color-light: #aaaaaa;
   --gds-grid-color-dark: #888888;
   --gds-grid-opacity: 0.4;
-  
+
   /* Measurement tool styling */
   --gds-measure-color: #ff6600;
   --gds-measure-line-width: 3;
@@ -265,11 +267,11 @@ bun run typecheck
 
 ## Browser Support
 
-- Chrome/Edge 90+
-- Firefox 88+
-- Safari 14+
+- Chrome/Edge 113+ (WebGPU)
+- Firefox 130+ (WebGPU, behind flag)
+- Safari 17+ (WebGPU)
 
-Requires WebGL2 support.
+Falls back to WebGL2 on unsupported browsers.
 
 ## License
 
@@ -278,7 +280,9 @@ MIT
 ## Credits
 
 Built with:
-- [Three.js](https://threejs.org/) - 3D rendering
+
+- [Three.js](https://threejs.org/) - 3D rendering (WebGPU/WebGL)
 - [GDSII](https://github.com/gdsfactory/gdsii) - GDS file parsing
-- [PixiJS](https://pixijs.com/) - Text rendering
 - [Earcut](https://github.com/mapbox/earcut) - Polygon triangulation
+
+Grid shader based on ["The Best Darn Grid Shader (Yet)"](https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8) by Ben Golus.

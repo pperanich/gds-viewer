@@ -18,7 +18,6 @@
   "dependencies": {
     "earcut": "^3.0.1",
     "gdsii": "^0.1.0",
-    "pixi.js": "^8.15.0",
     "three": "^0.170.0"
   },
   "devDependencies": {

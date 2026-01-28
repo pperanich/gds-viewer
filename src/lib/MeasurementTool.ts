@@ -1,7 +1,7 @@
 import * as THREE from "three";
+import { Line2NodeMaterial } from "three/webgpu";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
-import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 const CAP_LENGTH_PX = 10;
@@ -66,7 +66,7 @@ export class MeasurementTool {
   private dragStartScale: number = 1;
   
   private lineGroup: THREE.Group;
-  private lineMaterial: LineMaterial;
+  private lineMaterial: Line2NodeMaterial;
   private controls: OrbitControls | null = null;
   
   private labelContainer: HTMLDivElement;
@@ -83,14 +83,14 @@ export class MeasurementTool {
     this.lineGroup.renderOrder = 1000;
     scene.add(this.lineGroup);
     
-    this.lineMaterial = new LineMaterial({
+    this.lineMaterial = new Line2NodeMaterial({
       color: parseInt(DEFAULT_STYLES.color.replace("#", ""), 16),
       linewidth: DEFAULT_STYLES.lineWidth,
       depthTest: false,
       depthWrite: false,
       transparent: true,
-      worldUnits: false,
     });
+    this.lineMaterial.worldUnits = false;
 
     this.labelContainer = document.createElement("div");
     this.labelContainer.style.cssText = `
@@ -402,7 +402,7 @@ export class MeasurementTool {
 
     const mainGeom = new LineGeometry();
     mainGeom.setPositions([start.x, start.y, 0, end.x, end.y, 0]);
-    const mainLine = new Line2(mainGeom, this.lineMaterial);
+    const mainLine = new Line2(mainGeom, this.lineMaterial as any);
     mainLine.computeLineDistances();
     mainLine.renderOrder = 9999;
     this.lineGroup.add(mainLine);
@@ -413,7 +413,7 @@ export class MeasurementTool {
       start.x + perpX, start.y + perpY, 0,
       start.x - perpX, start.y - perpY, 0,
     ]);
-    const startCap = new Line2(startCapGeom, this.lineMaterial);
+    const startCap = new Line2(startCapGeom, this.lineMaterial as any);
     startCap.computeLineDistances();
     startCap.renderOrder = 9999;
     this.lineGroup.add(startCap);
@@ -424,7 +424,7 @@ export class MeasurementTool {
       end.x + perpX, end.y + perpY, 0,
       end.x - perpX, end.y - perpY, 0,
     ]);
-    const endCap = new Line2(endCapGeom, this.lineMaterial);
+    const endCap = new Line2(endCapGeom, this.lineMaterial as any);
     endCap.computeLineDistances();
     endCap.renderOrder = 9999;
     this.lineGroup.add(endCap);
@@ -667,10 +667,6 @@ export class MeasurementTool {
     if (!active) {
       this.clearAll();
     }
-  }
-
-  setResolution(width: number, height: number) {
-    this.lineMaterial.resolution.set(width, height);
   }
 
   setHostElement(host: HTMLElement) {

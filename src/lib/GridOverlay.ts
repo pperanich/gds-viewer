@@ -1,105 +1,104 @@
 import * as THREE from "three";
-
-const vertexShader = `
-varying vec4 vUv;
-
-uniform float uScale;
-uniform float uMajorGridFactor;
-
-void main() {
-    vec4 worldPos4 = modelMatrix * vec4(position, 1.0);
-    vec3 worldPos = worldPos4.xyz;
-
-    float division = uScale * uMajorGridFactor;
-    vec3 cameraCenteringOffset = floor(cameraPosition / division) * division;
-    
-    vUv.xy = (worldPos - cameraCenteringOffset).xy;
-    vUv.zw = worldPos.xy;
-
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`;
-
-const fragmentShader = `
-varying vec4 vUv;
-
-uniform float uScale;
-uniform float uMajorGridFactor;
-uniform float uMinorLineWidth;
-uniform float uMajorLineWidth;
-uniform vec3 uMinorLineColor;
-uniform vec3 uMajorLineColor;
-uniform float uOpacity;
-
-vec2 saturate2(vec2 value) {
-    return clamp(value, 0.0, 1.0);
-}
-
-void main() {
-    float majorGridSize = uScale * uMajorGridFactor;
-
-    vec4 uvDDXY = vec4(dFdx(vUv.xy), dFdy(vUv.xy));
-    vec2 uvDeriv = vec2(length(uvDDXY.xz), length(uvDDXY.yw));
-
-    // Major grid
-    float majorDiv = max(0.1, majorGridSize);
-    vec2 majorUVDeriv = uvDeriv / majorDiv;
-    float majorLineWidth = uMajorLineWidth * uScale / majorDiv;
-    vec2 majorDrawWidth = clamp(vec2(majorLineWidth), majorUVDeriv, vec2(0.5));
-    vec2 majorLineAA = majorUVDeriv * 1.5;
-    vec2 majorGridUV = 1.0 - abs(fract(vUv.xy / majorDiv) * 2.0 - 1.0);
-    vec2 majorGrid2 = smoothstep(majorDrawWidth + majorLineAA, majorDrawWidth - majorLineAA, majorGridUV);
-    majorGrid2 *= saturate2(majorLineWidth / majorDrawWidth);
-    majorGrid2 = mix(majorGrid2, vec2(majorLineWidth), saturate2(majorUVDeriv * 2.0 - 1.0));
-
-    // Minor grid
-    float minorDiv = max(0.1, uScale);
-    vec2 minorUVDeriv = uvDeriv / minorDiv;
-    float minorLineWidth = uMinorLineWidth * uScale / minorDiv;
-    vec2 minorDrawWidth = clamp(vec2(minorLineWidth), minorUVDeriv, vec2(0.5));
-    vec2 minorLineAA = minorUVDeriv * 1.5;
-    vec2 minorGridUV = 1.0 - abs(fract(vUv.xy / minorDiv) * 2.0 - 1.0);
-    vec2 minorGrid2 = smoothstep(minorDrawWidth + minorLineAA, minorDrawWidth - minorLineAA, minorGridUV);
-    minorGrid2 *= saturate2(minorLineWidth / minorDrawWidth);
-    minorGrid2 = mix(minorGrid2, vec2(minorLineWidth), saturate2(minorUVDeriv * 2.0 - 1.0));
-
-    // Combine grids
-    float minorGrid = mix(minorGrid2.x, 1.0, minorGrid2.y);
-    float majorGrid = mix(majorGrid2.x, 1.0, majorGrid2.y);
-
-    vec4 col = vec4(uMinorLineColor, minorGrid);
-    col = mix(col, vec4(uMajorLineColor, 1.0), majorGrid);
-    col.a *= uOpacity;
-
-    if (col.a < 0.01) discard;
-    
-    gl_FragColor = col;
-}
-`;
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import {
+  Fn,
+  vec2,
+  vec4,
+  float,
+  uniform,
+  positionWorld,
+  cameraPosition,
+  floor,
+  fract,
+  abs,
+  length,
+  mix,
+  clamp,
+  smoothstep,
+  dFdx,
+  dFdy,
+  Discard,
+  If,
+  max,
+} from "three/tsl";
 
 export class GridOverlay {
   private mesh: THREE.Mesh;
-  private material: THREE.ShaderMaterial;
+  private material: MeshBasicNodeMaterial;
   private gridSize: number = 100000;
 
+  private uScale = uniform(1.0);
+  private uMajorGridFactor = uniform(10.0);
+  private uMinorLineWidth = uniform(0.02);
+  private uMajorLineWidth = uniform(0.04);
+  private uMinorLineColor = uniform(new THREE.Color(0x888888));
+  private uMajorLineColor = uniform(new THREE.Color(0x666666));
+  private uOpacity = uniform(0.4);
+
   constructor() {
-    this.material = new THREE.ShaderMaterial({
-      uniforms: {
-        uScale: { value: 1.0 },
-        uMajorGridFactor: { value: 10.0 },
-        uMinorLineWidth: { value: 0.02 },
-        uMajorLineWidth: { value: 0.04 },
-        uMinorLineColor: { value: new THREE.Color(0x888888) },
-        uMajorLineColor: { value: new THREE.Color(0x666666) },
-        uOpacity: { value: 0.4 },
-      },
-      vertexShader,
-      fragmentShader,
+    const gridShader = Fn(() => {
+      const scale = this.uScale;
+      const majorGridFactor = this.uMajorGridFactor;
+      const minorLineWidthU = this.uMinorLineWidth;
+      const majorLineWidthU = this.uMajorLineWidth;
+      const minorLineColor = this.uMinorLineColor;
+      const majorLineColor = this.uMajorLineColor;
+      const opacity = this.uOpacity;
+
+      const division = scale.mul(majorGridFactor);
+      const cameraCenteringOffset = floor(cameraPosition.xy.div(division)).mul(division);
+      const worldPos = positionWorld.xy;
+      const vUv = worldPos.sub(cameraCenteringOffset);
+
+      const uvDDXY_x = dFdx(vUv);
+      const uvDDXY_y = dFdy(vUv);
+      const uvDeriv = vec2(
+        length(vec2(uvDDXY_x.x, uvDDXY_y.x)),
+        length(vec2(uvDDXY_x.y, uvDDXY_y.y))
+      );
+
+      const majorGridSize = scale.mul(majorGridFactor);
+      const majorDiv = max(float(0.1), majorGridSize);
+      const majorUVDeriv = uvDeriv.div(majorDiv);
+      const majorLineWidth = majorLineWidthU.mul(scale).div(majorDiv);
+      const majorDrawWidth = clamp(vec2(majorLineWidth, majorLineWidth), majorUVDeriv, vec2(0.5, 0.5));
+      const majorLineAA = majorUVDeriv.mul(1.5);
+      const majorGridUV = float(1.0).sub(abs(fract(vUv.div(majorDiv)).mul(2.0).sub(1.0)));
+      const majorGrid2Raw = smoothstep(majorDrawWidth.add(majorLineAA), majorDrawWidth.sub(majorLineAA), majorGridUV);
+      const majorGrid2Scaled = majorGrid2Raw.mul(clamp(vec2(majorLineWidth, majorLineWidth).div(majorDrawWidth), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+      const majorGrid2 = mix(majorGrid2Scaled, vec2(majorLineWidth, majorLineWidth), clamp(majorUVDeriv.mul(2.0).sub(1.0), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+
+      const minorDiv = max(float(0.1), scale);
+      const minorUVDeriv = uvDeriv.div(minorDiv);
+      const minorLineWidth = minorLineWidthU.mul(scale).div(minorDiv);
+      const minorDrawWidth = clamp(vec2(minorLineWidth, minorLineWidth), minorUVDeriv, vec2(0.5, 0.5));
+      const minorLineAA = minorUVDeriv.mul(1.5);
+      const minorGridUV = float(1.0).sub(abs(fract(vUv.div(minorDiv)).mul(2.0).sub(1.0)));
+      const minorGrid2Raw = smoothstep(minorDrawWidth.add(minorLineAA), minorDrawWidth.sub(minorLineAA), minorGridUV);
+      const minorGrid2Scaled = minorGrid2Raw.mul(clamp(vec2(minorLineWidth, minorLineWidth).div(minorDrawWidth), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+      const minorGrid2 = mix(minorGrid2Scaled, vec2(minorLineWidth, minorLineWidth), clamp(minorUVDeriv.mul(2.0).sub(1.0), vec2(0.0, 0.0), vec2(1.0, 1.0)));
+
+      const minorGrid = mix(minorGrid2.x, float(1.0), minorGrid2.y);
+      const majorGrid = mix(majorGrid2.x, float(1.0), majorGrid2.y);
+
+      const minorCol = vec4(minorLineColor, minorGrid);
+      const col = mix(minorCol, vec4(majorLineColor, 1.0), majorGrid);
+      const finalAlpha = col.w.mul(opacity);
+
+      If(finalAlpha.lessThan(0.01), () => {
+        Discard();
+      });
+
+      return vec4(col.xyz, finalAlpha);
+    });
+
+    this.material = new MeshBasicNodeMaterial({
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
       depthTest: false,
     });
+    this.material.outputNode = gridShader();
 
     const geometry = new THREE.PlaneGeometry(this.gridSize, this.gridSize);
     this.mesh = new THREE.Mesh(geometry, this.material);
@@ -113,9 +112,9 @@ export class GridOverlay {
 
   setColor(color: string, opacity: number = 0.4) {
     const c = new THREE.Color(color);
-    this.material.uniforms.uMinorLineColor!.value = c;
-    this.material.uniforms.uMajorLineColor!.value = c.clone().multiplyScalar(0.7);
-    this.material.uniforms.uOpacity!.value = opacity;
+    this.uMinorLineColor.value = c;
+    this.uMajorLineColor.value = c.clone().multiplyScalar(0.7);
+    this.uOpacity.value = opacity;
   }
 
   setVisible(visible: boolean) {
@@ -123,7 +122,7 @@ export class GridOverlay {
   }
 
   update(controlsTarget: THREE.Vector3, gridSpacing: number) {
-    this.material.uniforms.uScale!.value = gridSpacing;
+    this.uScale.value = gridSpacing;
     this.mesh.position.set(controlsTarget.x, controlsTarget.y, -0.01);
   }
 
