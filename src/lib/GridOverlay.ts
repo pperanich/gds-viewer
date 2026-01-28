@@ -189,8 +189,7 @@ export class GridOverlay {
     }
 
     this.mesh.scale.set(gridMultiplier, gridMultiplier, 1);
-    const gridZ = camera.position.z - (camera.near + 0.001);
-    this.mesh.position.set(camera.position.x, camera.position.y, gridZ);
+    this.mesh.position.set(camera.position.x, camera.position.y, -0.01);
   }
 
   dispose() {
