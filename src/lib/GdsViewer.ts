@@ -808,8 +808,10 @@ export class GdsViewer extends HTMLElement {
         this.controls.target,
       );
       this.gridOverlay.update(
+        this.activeCamera,
         this.controls.target,
         this.scaleRuler.getGridSpacing(),
+        this.renderer.getPixelRatio(),
       );
       this.measurementTool.updateLabels();
 
