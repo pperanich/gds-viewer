@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import earcut from "earcut";
+import GeometryWorker from "./geometry.worker.ts?worker&inline";
 import type {
   GDSDocument,
   Polygon,
@@ -8,9 +9,27 @@ import type {
   LayerStackEntry,
 } from "../types/gds";
 import { classifyLayer } from "./LayerClassifier";
+import { serializeGDSDocument } from "./gdsSerialization";
 
 export interface BuildGeometryOptions {
   zScale?: number;
+}
+
+export interface GeometryLayerPayload {
+  layerKey: string;
+  layer: number;
+  datatype: number;
+  layerType: string;
+  defaultVisible: boolean;
+  color: string;
+  opacity: number;
+  isTransparent: boolean;
+  renderOrder: number;
+  polygonOffsetFactor: number;
+  polygonOffsetUnits: number;
+  positions: Float32Array;
+  normals: Float32Array;
+  indices: Uint32Array;
 }
 
 interface LayerBuildData {
@@ -119,6 +138,97 @@ export function buildGeometry(
         geom.dispose();
       }
     }
+  }
+
+  return root;
+}
+
+export async function buildGeometryAsync(
+  document: GDSDocument,
+  layerStack: LayerStackConfig,
+  options: BuildGeometryOptions = {}
+): Promise<THREE.Group> {
+  if (typeof Worker === "undefined") {
+    return buildGeometry(document, layerStack, options);
+  }
+
+  return new Promise((resolve) => {
+    const worker = new GeometryWorker();
+
+    worker.onmessage = (event: MessageEvent) => {
+      const { type, layers, error } = event.data as {
+        type: string;
+        layers?: GeometryLayerPayload[];
+        error?: string;
+      };
+
+      if (type === "complete" && layers) {
+        worker.terminate();
+        resolve(buildGeometryFromPayload(layers));
+      } else if (type === "error") {
+        worker.terminate();
+        console.warn("Geometry worker failed, falling back to main thread:", error);
+        resolve(buildGeometry(document, layerStack, options));
+      }
+    };
+
+    worker.onerror = (event: ErrorEvent) => {
+      worker.terminate();
+      console.warn(
+        "Geometry worker crashed, falling back to main thread:",
+        event.message
+      );
+      resolve(buildGeometry(document, layerStack, options));
+    };
+
+    const serialized = serializeGDSDocument(document);
+    worker.postMessage({
+      type: "build",
+      document: serialized,
+      layerStack,
+      options,
+    });
+  });
+}
+
+function buildGeometryFromPayload(layers: GeometryLayerPayload[]): THREE.Group {
+  const root = new THREE.Group();
+
+  for (const layer of layers) {
+    if (layer.indices.length === 0) continue;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(layer.positions, 3),
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.Float32BufferAttribute(layer.normals, 3),
+    );
+    geometry.setIndex(new THREE.Uint32BufferAttribute(layer.indices, 1));
+
+    const material = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(layer.color),
+      side: THREE.DoubleSide,
+      transparent: layer.isTransparent,
+      opacity: layer.opacity,
+      depthWrite: !layer.isTransparent,
+      polygonOffset: true,
+      polygonOffsetFactor: layer.polygonOffsetFactor,
+      polygonOffsetUnits: layer.polygonOffsetUnits,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData = {
+      layerKey: layer.layerKey,
+      layer: layer.layer,
+      datatype: layer.datatype,
+      layerType: layer.layerType,
+    };
+    mesh.visible = layer.defaultVisible;
+    mesh.renderOrder = layer.renderOrder;
+    root.add(mesh);
   }
 
   return root;

@@ -3,14 +3,14 @@ import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { GDSDocument, LayerStackConfig, TextElement } from "../types/gds";
 import { parseGDSII } from "./GDSParser";
-import { buildGeometry, buildLayerMap, getUnitScale } from "./GeometryBuilder";
+import { buildGeometryAsync, buildLayerMap, getUnitScale } from "./GeometryBuilder";
 import { classifyLayer, getTypeColor } from "./LayerClassifier";
+import { lypToLayerStack } from "./LypParser";
 import {
-  loadLypFromUrl,
-  lypToLayerStack,
-  loadLypFromFile,
-  parseLypFile,
-} from "./LypParser";
+  loadLypFromUrlInWorker,
+  loadLypFromFileInWorker,
+  parseLypFileInWorker,
+} from "./LypWorkerClient";
 import { textRenderer, TextLayerGroup } from "./TextRenderer";
 import { ScaleRuler } from "./ScaleRuler";
 import { GridOverlay } from "./GridOverlay";
@@ -40,6 +40,7 @@ export class GdsViewer extends HTMLElement {
   private canvas: HTMLCanvasElement;
   private layerPanel: HTMLDivElement;
   private controlsPanel: HTMLDivElement;
+  private layersCollapsed: boolean = false;
 
   private zScale: number = 1;
   private darkMode: boolean = false;
@@ -47,9 +48,10 @@ export class GdsViewer extends HTMLElement {
   private baseViewHeight: number = 100;
   private is2DMode: boolean = false;
   private rendererReady: boolean = false;
+  private buildToken: number = 0;
 
   static get observedAttributes() {
-    return ["gds-url", "layer-stack-url", "lyp-url"];
+    return ["gds-url", "layer-stack-url", "lyp-url", "layers-collapsed", "theme"];
   }
 
   constructor() {
@@ -83,6 +85,9 @@ export class GdsViewer extends HTMLElement {
         --gds-grid-color-light: #aaaaaa;
         --gds-grid-color-dark: #888888;
         --gds-grid-opacity: 0.4;
+        --gds-grid-overlay-color-light: #8b5cf6;
+        --gds-grid-overlay-color-dark: #e9d5ff;
+        --gds-grid-overlay-opacity: 0.18;
         
         --gds-measure-color: #ff6600;
         --gds-measure-line-width: 3;
@@ -107,12 +112,12 @@ export class GdsViewer extends HTMLElement {
       position:absolute;top:10px;right:10px;
       background:var(--gds-panel-bg);color:var(--gds-panel-text);
       padding:var(--gds-panel-padding);border-radius:var(--gds-panel-radius);
-      max-height:calc(100% - 40px);overflow-y:auto;
+      overflow:hidden;
       font-family:var(--gds-panel-font);font-size:var(--gds-panel-font-size);
       min-width:180px;
       z-index:100;
     `;
-    this.layerPanel.innerHTML = "<strong>Layers</strong>";
+    this.layerPanel.innerHTML = this.renderLayerPanelShell("");
     this.container.appendChild(this.layerPanel);
 
     this.controlsPanel = document.createElement("div");
@@ -184,8 +189,10 @@ export class GdsViewer extends HTMLElement {
   connectedCallback() {
     this.resizeObserver.observe(this.container);
     this.handleResize();
+    this.setTheme(this.getThemeFromAttribute(), false);
     this.applyTheme();
     this.startRenderLoop();
+    this.setLayersCollapsed(this.hasAttribute("layers-collapsed"), false);
     this.loadFromAttributes();
   }
 
@@ -205,6 +212,14 @@ export class GdsViewer extends HTMLElement {
       name === "lyp-url"
     ) {
       this.loadFromAttributes();
+      return;
+    }
+    if (name === "layers-collapsed") {
+      this.setLayersCollapsed(this.hasAttribute("layers-collapsed"), false);
+      return;
+    }
+    if (name === "theme") {
+      this.setTheme(this.getThemeFromAttribute(), false);
     }
   }
 
@@ -216,19 +231,27 @@ export class GdsViewer extends HTMLElement {
     if (!gdsUrl) return;
 
     try {
-      const gdsBuffer = await fetch(gdsUrl).then((r) => r.arrayBuffer());
-      this.gdsDocument = await parseGDSII(gdsBuffer);
+      const gdsPromise = fetch(gdsUrl)
+        .then((r) => r.arrayBuffer())
+        .then((buffer) => parseGDSII(buffer));
 
-      if (lypUrl) {
-        const lypResult = await loadLypFromUrl(lypUrl);
-        this.layerStack = lypToLayerStack(lypResult);
-      } else if (layerStackUrl) {
-        this.layerStack = await fetch(layerStackUrl).then((r) => r.json());
-      } else {
-        this.layerStack = this.createDefaultLayerStack();
-      }
+      const layerStackPromise = lypUrl
+        ? loadLypFromUrlInWorker(lypUrl).then((lypResult) =>
+            lypToLayerStack(lypResult),
+          )
+        : layerStackUrl
+          ? fetch(layerStackUrl).then((r) => r.json())
+          : Promise.resolve<LayerStackConfig | null>(null);
 
-      this.buildAndRenderModel();
+      const [gdsDocument, layerStack] = await Promise.all([
+        gdsPromise,
+        layerStackPromise,
+      ]);
+
+      this.gdsDocument = gdsDocument;
+      this.layerStack = layerStack ?? this.createDefaultLayerStack();
+
+      await this.buildAndRenderModel();
     } catch (error) {
       console.error("Failed to load GDS:", error);
     }
@@ -311,8 +334,23 @@ export class GdsViewer extends HTMLElement {
     }
   }
 
-  private buildAndRenderModel() {
+  private async buildAndRenderModel() {
     if (!this.gdsDocument || !this.layerStack) return;
+
+    const token = ++this.buildToken;
+
+    const nextModel = await buildGeometryAsync(
+      this.gdsDocument,
+      this.layerStack,
+      {
+        zScale: this.baseZScale,
+      },
+    );
+
+    if (token !== this.buildToken) {
+      this.disposeGroup(nextModel);
+      return;
+    }
 
     if (this.modelGroup) {
       this.scene.remove(this.modelGroup);
@@ -324,20 +362,20 @@ export class GdsViewer extends HTMLElement {
       this.disposeGroup(this.textGroup);
     }
 
-    this.modelGroup = buildGeometry(this.gdsDocument, this.layerStack, {
-      zScale: this.baseZScale,
-    });
+    this.modelGroup = nextModel;
     this.modelGroup.scale.z = this.zScale;
     this.scene.add(this.modelGroup);
+    this.updateGridOverlayBounds();
 
-    this.renderTexts();
+    this.fitCameraToModel();
+
+    await this.renderTexts(token);
 
     this.initLayerVisibility();
     this.updateLayerPanel();
-    this.fitCameraToModel();
   }
 
-  private async renderTexts() {
+  private async renderTexts(buildToken?: number) {
     if (!this.gdsDocument || !this.layerStack) return;
 
     const allTexts: TextElement[] = [];
@@ -352,7 +390,7 @@ export class GdsViewer extends HTMLElement {
     const unitScale = getUnitScale(this.layerStack.units ?? "um");
 
     try {
-      this.textLayerGroups = await textRenderer.renderTexts(
+      const textLayerGroups = await textRenderer.renderTexts(
         allTexts,
         layerMap,
         {
@@ -363,7 +401,12 @@ export class GdsViewer extends HTMLElement {
         },
       );
 
-      this.textGroup = textRenderer.createTextGroup(this.textLayerGroups);
+      if (buildToken !== undefined && buildToken !== this.buildToken) {
+        return;
+      }
+
+      this.textLayerGroups = textLayerGroups;
+      this.textGroup = textRenderer.createTextGroup(textLayerGroups);
       this.textGroup.scale.z = this.zScale;
       this.scene.add(this.textGroup);
 
@@ -436,9 +479,7 @@ export class GdsViewer extends HTMLElement {
       'button[data-control="theme"]',
     );
     themeBtn?.addEventListener("click", () => {
-      this.darkMode = !this.darkMode;
-      this.applyTheme();
-      this.updateControlsPanel();
+      this.setTheme(this.darkMode ? "light" : "dark", true);
     });
 
     const view3DBtn = this.controlsPanel.querySelector(
@@ -454,6 +495,8 @@ export class GdsViewer extends HTMLElement {
     view2DBtn?.addEventListener("click", () => {
       if (!this.is2DMode) this.toggle2DMode();
     });
+
+    this.updatePanelLayout();
   }
 
   private applyTheme() {
@@ -483,12 +526,46 @@ export class GdsViewer extends HTMLElement {
       styles.getPropertyValue("--gds-grid-color-light").trim() || "#aaaaaa";
     const gridDark =
       styles.getPropertyValue("--gds-grid-color-dark").trim() || "#888888";
+    const gridOverlayLight =
+      styles.getPropertyValue("--gds-grid-overlay-color-light").trim() ||
+      "#8b5cf6";
+    const gridOverlayDark =
+      styles.getPropertyValue("--gds-grid-overlay-color-dark").trim() ||
+      "#e9d5ff";
     const gridOpacity =
       parseFloat(styles.getPropertyValue("--gds-grid-opacity").trim()) || 0.4;
+    const gridOverlayOpacity =
+      parseFloat(styles.getPropertyValue("--gds-grid-overlay-opacity").trim()) ||
+      0.18;
     const gridColor = this.darkMode ? gridDark : gridLight;
-    this.gridOverlay.setColor(gridColor, gridOpacity);
+    const gridOverlayColor = this.darkMode ? gridOverlayDark : gridOverlayLight;
+    this.gridOverlay.setColor(
+      gridColor,
+      gridOpacity,
+      gridOverlayOpacity,
+      gridOverlayColor,
+    );
 
     this.measurementTool.updateStylesFromCSS();
+  }
+
+  private getThemeFromAttribute(): "light" | "dark" {
+    const theme = this.getAttribute("theme")?.toLowerCase();
+    return theme === "dark" ? "dark" : "light";
+  }
+
+  private setTheme(theme: "light" | "dark", updateAttribute: boolean) {
+    const darkMode = theme === "dark";
+    if (this.darkMode === darkMode && !updateAttribute) return;
+
+    this.darkMode = darkMode;
+
+    if (updateAttribute) {
+      this.setAttribute("theme", theme);
+    }
+
+    this.applyTheme();
+    this.updateControlsPanel();
   }
 
   private updateZScale() {
@@ -498,6 +575,22 @@ export class GdsViewer extends HTMLElement {
     if (this.textGroup) {
       this.textGroup.scale.z = this.zScale;
     }
+  }
+
+  private updateGridOverlayBounds() {
+    if (!this.gdsDocument) {
+      this.gridOverlay.setOverlayBounds(null);
+      return;
+    }
+
+    const dbToUm = this.gdsDocument.units.database / 1e-6;
+    const bounds = this.gdsDocument.boundingBox;
+    this.gridOverlay.setOverlayBounds({
+      minX: bounds.minX * dbToUm,
+      maxX: bounds.maxX * dbToUm,
+      minY: bounds.minY * dbToUm,
+      maxY: bounds.maxY * dbToUm,
+    });
   }
 
   private initLayerVisibility() {
@@ -518,7 +611,10 @@ export class GdsViewer extends HTMLElement {
 
   private updateLayerPanel() {
     if (!this.gdsDocument || !this.layerStack) {
-      this.layerPanel.innerHTML = "<strong>Layers</strong><div>No data</div>";
+      this.layerPanel.innerHTML = this.renderLayerPanelShell(
+        "<div>No data</div>",
+      );
+      this.bindLayerPanelControls();
       return;
     }
 
@@ -602,7 +698,7 @@ export class GdsViewer extends HTMLElement {
       unknown: "Other",
     };
 
-    let html = "<strong>Layers</strong>";
+    let contentHtml = "";
 
     for (const type of typeOrder) {
       const group = typeGroups.get(type);
@@ -611,7 +707,7 @@ export class GdsViewer extends HTMLElement {
       const groupId = `layer-group-${type}`;
       const label = typeLabels[type] || type;
 
-      html += `
+      contentHtml += `
         <div style="margin-top:12px;">
           <div class="layer-group-header" data-group="${groupId}" 
             style="display:flex;align-items:center;cursor:pointer;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
@@ -637,7 +733,7 @@ export class GdsViewer extends HTMLElement {
           ? '<span style="font-size:9px;background:#4a4a8a;padding:1px 4px;border-radius:3px;margin-left:4px;">TEXT</span>'
           : "";
 
-        html += `
+        contentHtml += `
           <label style="display:flex;align-items:center;margin-top:6px;cursor:pointer;padding-left:16px;${dimStyle}">
             <input type="checkbox" ${checked} data-layer="${key}" 
               style="margin-right:8px;cursor:pointer;">
@@ -648,10 +744,37 @@ export class GdsViewer extends HTMLElement {
         `;
       }
 
-      html += "</div></div>";
+      contentHtml += "</div></div>";
     }
 
-    this.layerPanel.innerHTML = html;
+    this.layerPanel.innerHTML = this.renderLayerPanelShell(contentHtml);
+    this.bindLayerPanelControls();
+    this.updatePanelLayout();
+  }
+
+  private renderLayerPanelShell(contentHtml: string): string {
+    const buttonLabel = this.layersCollapsed ? "Show" : "Hide";
+    return `
+      <div data-role="layer-panel-header" style="display:flex;align-items:center;gap:8px;">
+        <strong>Layers</strong>
+        <button data-role="layer-toggle" style="margin-left:auto;padding:2px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:inherit;font-size:11px;cursor:pointer;">
+          ${buttonLabel}
+        </button>
+      </div>
+      <div data-role="layer-panel-content" style="${this.layersCollapsed ? "display:none;" : ""}overflow-y:auto;">
+        ${contentHtml}
+      </div>
+    `;
+  }
+
+  private bindLayerPanelControls() {
+    const toggle = this.layerPanel.querySelector(
+      '[data-role="layer-toggle"]',
+    ) as HTMLButtonElement | null;
+    toggle?.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.setLayersCollapsed(!this.layersCollapsed, true);
+    });
 
     this.layerPanel.querySelectorAll("input[type=checkbox]").forEach((cb) => {
       cb.addEventListener("change", (e) => {
@@ -678,8 +801,32 @@ export class GdsViewer extends HTMLElement {
           const isCollapsed = content.style.display === "none";
           content.style.display = isCollapsed ? "block" : "none";
           icon.textContent = isCollapsed ? "▼" : "▶";
-        });
       });
+    });
+  }
+
+  private setLayersCollapsed(collapsed: boolean, updateAttribute: boolean) {
+    this.layersCollapsed = collapsed;
+    if (updateAttribute) {
+      if (collapsed) {
+        this.setAttribute("layers-collapsed", "");
+      } else {
+        this.removeAttribute("layers-collapsed");
+      }
+    }
+    const content = this.layerPanel.querySelector(
+      '[data-role="layer-panel-content"]',
+    ) as HTMLElement | null;
+    if (content) {
+      content.style.display = collapsed ? "none" : "block";
+    }
+    const toggle = this.layerPanel.querySelector(
+      '[data-role="layer-toggle"]',
+    ) as HTMLButtonElement | null;
+    if (toggle) {
+      toggle.textContent = collapsed ? "Show" : "Hide";
+    }
+    this.updatePanelLayout();
   }
 
   private setLayerVisibility(layerKey: string, visible: boolean) {
@@ -790,6 +937,7 @@ export class GdsViewer extends HTMLElement {
     this.perspectiveCamera.updateProjectionMatrix();
     this.updateOrthoCamera();
     this.renderer.setSize(width, height);
+    this.updatePanelLayout();
   }
 
   private startRenderLoop() {
@@ -826,6 +974,31 @@ export class GdsViewer extends HTMLElement {
 
       this.renderer.render(this.scene, this.activeCamera);
     });
+  }
+
+  private updatePanelLayout() {
+    const gap = 12;
+    const controlsRect = this.controlsPanel?.getBoundingClientRect();
+    const layersRect = this.layerPanel?.getBoundingClientRect();
+    const header = this.layerPanel.querySelector(
+      '[data-role="layer-panel-header"]',
+    ) as HTMLElement | null;
+    const content = this.layerPanel.querySelector(
+      '[data-role="layer-panel-content"]',
+    ) as HTMLElement | null;
+    if (!controlsRect || !layersRect || !header || !content) return;
+    const availableHeight = controlsRect.top - layersRect.top - gap;
+    const headerHeight = header.getBoundingClientRect().height;
+    const layerStyles = getComputedStyle(this.layerPanel);
+    const paddingTop = parseFloat(layerStyles.paddingTop) || 0;
+    const paddingBottom = parseFloat(layerStyles.paddingBottom) || 0;
+    const borderTop = parseFloat(layerStyles.borderTopWidth) || 0;
+    const borderBottom = parseFloat(layerStyles.borderBottomWidth) || 0;
+    const chromeHeight =
+      headerHeight + paddingTop + paddingBottom + borderTop + borderBottom;
+    const contentMaxHeight = Math.max(80, availableHeight - chromeHeight);
+    content.style.maxHeight = `${contentMaxHeight}px`;
+    this.layerPanel.style.maxHeight = "";
   }
 
   private toggle2DMode() {
@@ -885,6 +1058,7 @@ export class GdsViewer extends HTMLElement {
     const aspect = (rect.width || 1) / (rect.height || 1);
     const halfHeight = viewHeight / 2;
 
+    this.orthoCamera.zoom = 1;
     this.orthoCamera.left = -halfHeight * aspect;
     this.orthoCamera.right = halfHeight * aspect;
     this.orthoCamera.top = halfHeight;
@@ -900,7 +1074,9 @@ export class GdsViewer extends HTMLElement {
   }
 
   private switchTo3DView(preservedTarget: THREE.Vector3) {
-    const viewHeight = this.orthoCamera.top - this.orthoCamera.bottom;
+    const viewHeight =
+      (this.orthoCamera.top - this.orthoCamera.bottom) /
+      (this.orthoCamera.zoom || 1);
     const fovRad = this.perspectiveCamera.fov * (Math.PI / 180);
     const zDistance = viewHeight / 2 / Math.tan(fovRad / 2);
 
@@ -939,6 +1115,7 @@ export class GdsViewer extends HTMLElement {
       this.orthoCamera.right = viewHalfSize * aspect;
       this.orthoCamera.top = viewHalfSize;
       this.orthoCamera.bottom = -viewHalfSize;
+      this.orthoCamera.zoom = 1;
       this.orthoCamera.updateProjectionMatrix();
 
       this.orthoCamera.position.set(center.x, center.y, 1000);
@@ -971,43 +1148,61 @@ export class GdsViewer extends HTMLElement {
     const buffer = await file.arrayBuffer();
     this.gdsDocument = await parseGDSII(buffer);
     this.layerStack = this.createDefaultLayerStack();
-    this.buildAndRenderModel();
+    await this.buildAndRenderModel();
+  }
+
+  async loadGdsAndLypFiles(gdsFile: File, lypFile: File): Promise<void> {
+    const gdsPromise = gdsFile
+      .arrayBuffer()
+      .then((buffer) => parseGDSII(buffer));
+    const lypPromise = loadLypFromFileInWorker(lypFile).then((lypResult) =>
+      lypToLayerStack(lypResult),
+    );
+
+    const [gdsDocument, layerStack] = await Promise.all([
+      gdsPromise,
+      lypPromise,
+    ]);
+
+    this.gdsDocument = gdsDocument;
+    this.layerStack = layerStack;
+    await this.buildAndRenderModel();
   }
 
   async loadGdsBuffer(buffer: ArrayBuffer): Promise<void> {
     this.gdsDocument = await parseGDSII(buffer);
     this.layerStack = this.createDefaultLayerStack();
-    this.buildAndRenderModel();
+    await this.buildAndRenderModel();
   }
 
   setLayerStack(config: LayerStackConfig): void {
     this.layerStack = config;
     if (this.gdsDocument) {
-      this.buildAndRenderModel();
+      void this.buildAndRenderModel();
     }
   }
 
   async loadLypFile(file: File): Promise<void> {
-    const lypResult = await loadLypFromFile(file);
+    const lypResult = await loadLypFromFileInWorker(file);
     this.layerStack = lypToLayerStack(lypResult);
     if (this.gdsDocument) {
-      this.buildAndRenderModel();
+      await this.buildAndRenderModel();
     }
   }
 
   async loadLypFromUrl(url: string): Promise<void> {
-    const lypResult = await loadLypFromUrl(url);
+    const lypResult = await loadLypFromUrlInWorker(url);
     this.layerStack = lypToLayerStack(lypResult);
     if (this.gdsDocument) {
-      this.buildAndRenderModel();
+      await this.buildAndRenderModel();
     }
   }
 
   async loadLypFromString(xmlString: string): Promise<void> {
-    const lypResult = parseLypFile(xmlString);
+    const lypResult = await parseLypFileInWorker(xmlString);
     this.layerStack = lypToLayerStack(lypResult);
     if (this.gdsDocument) {
-      this.buildAndRenderModel();
+      await this.buildAndRenderModel();
     }
   }
 
@@ -1019,7 +1214,7 @@ export class GdsViewer extends HTMLElement {
     if (!this.layerStack) {
       this.layerStack = this.createDefaultLayerStack();
     }
-    this.buildAndRenderModel();
+    await this.buildAndRenderModel();
   }
 
   getDocument(): GDSDocument | null {
@@ -1033,6 +1228,47 @@ export class GdsViewer extends HTMLElement {
   getBackend(): "webgpu" | "webgl" {
     const backend = this.renderer.backend as { isWebGPUBackend?: boolean };
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
+  }
+
+  set2DMode(enabled: boolean): void {
+    if (enabled === this.is2DMode) return;
+    this.toggle2DMode();
+  }
+
+  focusOn(
+    x: number,
+    y: number,
+    options?: { viewHeightUm?: number },
+  ): void {
+    const target = new THREE.Vector3(x, y, 0);
+    const currentTarget = this.controls.target.clone();
+    const active = this.activeCamera;
+    const delta = active.position.clone().sub(currentTarget);
+
+    if (options?.viewHeightUm && options.viewHeightUm > 0) {
+      if (active instanceof THREE.PerspectiveCamera) {
+        const fovRad = active.fov * (Math.PI / 180);
+        const distance = options.viewHeightUm / 2 / Math.tan(fovRad / 2);
+        const dir =
+          delta.lengthSq() > 0 ? delta.normalize() : new THREE.Vector3(0, 0, 1);
+        active.position.copy(target.clone().add(dir.multiplyScalar(distance)));
+      } else {
+        const viewHeight = active.top - active.bottom;
+        active.zoom = viewHeight / options.viewHeightUm;
+        active.updateProjectionMatrix();
+      }
+    } else {
+      active.position.copy(target.clone().add(delta));
+    }
+
+    if (active instanceof THREE.OrthographicCamera) {
+      active.position.set(target.x, target.y, active.position.z);
+      active.up.set(0, 1, 0);
+      active.lookAt(target.x, target.y, 0);
+    }
+
+    this.controls.target.copy(target);
+    this.controls.update();
   }
 }
 

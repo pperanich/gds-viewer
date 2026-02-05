@@ -52,7 +52,8 @@
         background: #5a5a9a;
       }
       #file-input,
-      #lyp-input {
+      #lyp-input,
+      #pair-input {
         display: none;
       }
       .main-content {
@@ -169,13 +170,14 @@
       <header>
         <h1>GDS Viewer</h1>
         <div class="header-controls">
-          <label class="upload-btn">
-            Open GDS File
-            <input type="file" id="file-input" accept=".gds,.gdsii" />
-          </label>
-          <label class="upload-btn" style="background:#3a6a3a;">
-            Open LYP File
-            <input type="file" id="lyp-input" accept=".lyp" />
+          <label class="upload-btn" style="background:#2f5b8a;">
+            Open GDS/LYP
+            <input
+              type="file"
+              id="pair-input"
+              accept=".gds,.gdsii,.lyp"
+              multiple
+            />
           </label>
         </div>
       </header>
@@ -203,8 +205,7 @@
       import "./src/index.ts";
 
       const viewer = document.getElementById("viewer");
-      const fileInput = document.getElementById("file-input");
-      const lypInput = document.getElementById("lyp-input");
+      const pairInput = document.getElementById("pair-input");
       const dropZone = document.getElementById("drop-zone");
       const container = document.querySelector(".viewer-container");
       const fileList = document.getElementById("file-list");
@@ -308,31 +309,37 @@
       loadDefaultLyp();
       fetchGdsFileList();
 
-      // Local file handlers (keep existing functionality)
-      lypInput.addEventListener("change", async (e) => {
-        const file = e.target.files[0];
-        if (file) {
-          loadingIndicator.classList.add("active");
-          try {
-            await viewer.loadLypFile(file);
-            lypLoaded = true;
-          } finally {
-            loadingIndicator.classList.remove("active");
-          }
-        }
-      });
+      pairInput.addEventListener("change", async (e) => {
+        const files = Array.from(e.target.files || []);
+        const gdsFile = files.find((file) => {
+          const name = file.name.toLowerCase();
+          return name.endsWith(".gds") || name.endsWith(".gdsii");
+        });
+        const lypFile = files.find((file) =>
+          file.name.toLowerCase().endsWith(".lyp"),
+        );
 
-      fileInput.addEventListener("change", async (e) => {
-        const file = e.target.files[0];
-        if (file) {
+        if (!gdsFile && !lypFile) return;
+
+        if (gdsFile) {
           hideSidebar();
           currentFile = null;
-          loadingIndicator.classList.add("active");
-          try {
-            await viewer.loadGdsFile(file);
-          } finally {
-            loadingIndicator.classList.remove("active");
+        }
+
+        loadingIndicator.classList.add("active");
+        try {
+          if (gdsFile && lypFile) {
+            await viewer.loadGdsAndLypFiles(gdsFile, lypFile);
+            lypLoaded = true;
+          } else if (gdsFile) {
+            await viewer.loadGdsFile(gdsFile);
+          } else if (lypFile) {
+            await viewer.loadLypFile(lypFile);
+            lypLoaded = true;
           }
+        } finally {
+          loadingIndicator.classList.remove("active");
+          pairInput.value = "";
         }
       });
 

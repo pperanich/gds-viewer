@@ -19,6 +19,11 @@ export interface LypParseResult {
   groups: Map<string, LypLayerProperties[]>;
 }
 
+export interface SerializedLypParseResult {
+  layers: LypLayerProperties[];
+  groups: [string, LypLayerProperties[]][];
+}
+
 const SOURCE_PATTERN = /^(\d+)\/(\d+)@/;
 const WILDCARD_SOURCE = "*/*@*";
 
@@ -28,6 +33,24 @@ export function parseLypFile(xmlContent: string): LypParseResult {
   }
 
   return parseLypWithRegex(xmlContent);
+}
+
+export function serializeLypParseResult(
+  result: LypParseResult
+): SerializedLypParseResult {
+  return {
+    layers: result.layers,
+    groups: Array.from(result.groups.entries()),
+  };
+}
+
+export function deserializeLypParseResult(
+  data: SerializedLypParseResult
+): LypParseResult {
+  return {
+    layers: data.layers,
+    groups: new Map(data.groups),
+  };
 }
 
 function parseLypWithDOMParser(xmlContent: string): LypParseResult {

@@ -101,28 +101,57 @@ function createInfiniteGridGeometry(): THREE.BufferGeometry {
   return geometry;
 }
 
+function createUnitQuadGeometry(): THREE.BufferGeometry {
+  const positions = new Float32Array([
+    -1, -1, 0,
+     1, -1, 0,
+    -1,  1, 0,
+     1,  1, 0,
+  ]);
+
+  const indices = new Uint16Array([
+    0, 1, 2,
+    2, 1, 3,
+  ]);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  return geometry;
+}
+
 export class GridOverlay {
-  private mesh: THREE.Mesh;
-  private material: MeshBasicNodeMaterial;
+  private root: THREE.Group;
+  private baseMesh: THREE.Mesh;
+  private overlayMesh: THREE.Mesh;
+  private baseMaterial: MeshBasicNodeMaterial;
+  private overlayMaterial: MeshBasicNodeMaterial;
 
   private uScale = uniform(1.0);
   private uMajorGridFactor = uniform(10.0);
-  private uMinorLineWidthPx = uniform(1.0);
-  private uMajorLineWidthPx = uniform(2.0);
-  private uMajorLineColor = uniform(new THREE.Color(0x666666));
-  private uMinorLineColor = uniform(new THREE.Color(0x888888));
-  private uOpacity = uniform(0.4);
+  private uMinorLineWidthPx = uniform(1.2);
+  private uMajorLineWidthPx = uniform(2.4);
+  private uBaseMajorLineColor = uniform(new THREE.Color(0x666666));
+  private uBaseMinorLineColor = uniform(new THREE.Color(0x888888));
+  private uOverlayMajorLineColor = uniform(new THREE.Color(0x666666));
+  private uOverlayMinorLineColor = uniform(new THREE.Color(0x888888));
+  private uBaseOpacity = uniform(0.4);
+  private uOverlayOpacity = uniform(0.12);
   private uPixelRatio = uniform(1.0);
 
   constructor() {
-    const gridShader = Fn(() => {
+    const makeGridShader = (
+      majorColorUniform: ReturnType<typeof uniform>,
+      minorColorUniform: ReturnType<typeof uniform>,
+      opacityUniform: ReturnType<typeof uniform>,
+    ) =>
+      Fn(() => {
       const scale = this.uScale;
       const majorGridFactor = this.uMajorGridFactor;
       const minorLineWidthPx = this.uMinorLineWidthPx;
       const majorLineWidthPx = this.uMajorLineWidthPx;
-      const majorLineColor = this.uMajorLineColor;
-      const minorLineColor = this.uMinorLineColor;
-      const opacity = this.uOpacity;
+      const majorLineColor = majorColorUniform;
+      const minorLineColor = minorColorUniform;
       const pixelRatio = this.uPixelRatio;
 
       const majorGridSize = max(scale.mul(majorGridFactor), 0.0001);
@@ -137,42 +166,100 @@ export class GridOverlay {
 
       const minorCol = vec4(minorLineColor, minorAlpha);
       const col = mix(minorCol, vec4(majorLineColor, 1.0), majorAlpha);
-      const finalAlpha = col.w.mul(opacity);
+      const finalAlpha = col.w.mul(opacityUniform);
 
       If(finalAlpha.lessThan(0.001), () => {
         Discard();
       });
 
       return vec4(col.xyz, finalAlpha);
-    });
+      });
 
-    this.material = new MeshBasicNodeMaterial({
+    this.baseMaterial = new MeshBasicNodeMaterial({
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
       depthTest: false,
     });
-    this.material.outputNode = gridShader();
+    this.baseMaterial.outputNode = makeGridShader(
+      this.uBaseMajorLineColor,
+      this.uBaseMinorLineColor,
+      this.uBaseOpacity,
+    )();
 
-    const geometry = createInfiniteGridGeometry();
-    this.mesh = new THREE.Mesh(geometry, this.material);
-    this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = -1;
+    this.overlayMaterial = new MeshBasicNodeMaterial({
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: false,
+    });
+    this.overlayMaterial.outputNode = makeGridShader(
+      this.uOverlayMajorLineColor,
+      this.uOverlayMinorLineColor,
+      this.uOverlayOpacity,
+    )();
+
+    this.baseMesh = new THREE.Mesh(createInfiniteGridGeometry(), this.baseMaterial);
+    this.baseMesh.frustumCulled = false;
+    this.baseMesh.renderOrder = -1;
+
+    this.overlayMesh = new THREE.Mesh(createUnitQuadGeometry(), this.overlayMaterial);
+    this.overlayMesh.frustumCulled = false;
+    this.overlayMesh.renderOrder = 5000;
+    this.overlayMesh.visible = false;
+
+    this.root = new THREE.Group();
+    this.root.add(this.baseMesh);
+    this.root.add(this.overlayMesh);
   }
 
-  getObject(): THREE.Mesh {
-    return this.mesh;
+  getObject(): THREE.Group {
+    return this.root;
   }
 
-  setColor(color: string, opacity: number = 0.4) {
-    const c = new THREE.Color(color);
-    this.uMinorLineColor.value = c;
-    this.uMajorLineColor.value = c.clone().multiplyScalar(0.7);
-    this.uOpacity.value = opacity;
+  setColor(
+    color: string,
+    opacity: number = 0.4,
+    overlayOpacity: number = 0.12,
+    overlayColor?: string,
+  ) {
+    const baseColor = new THREE.Color(color);
+    const overlayGridColor = new THREE.Color(overlayColor ?? color);
+    this.uBaseMinorLineColor.value = baseColor;
+    this.uBaseMajorLineColor.value = baseColor.clone().multiplyScalar(0.7);
+    this.uOverlayMinorLineColor.value = overlayGridColor;
+    this.uOverlayMajorLineColor.value = overlayGridColor.clone().multiplyScalar(0.85);
+    this.uBaseOpacity.value = opacity;
+    this.uOverlayOpacity.value = overlayOpacity;
+  }
+
+  setOverlayBounds(
+    bounds:
+      | {
+          minX: number;
+          maxX: number;
+          minY: number;
+          maxY: number;
+        }
+      | null,
+  ) {
+    if (!bounds) {
+      this.overlayMesh.visible = false;
+      return;
+    }
+
+    const width = Math.max(1e-6, bounds.maxX - bounds.minX);
+    const height = Math.max(1e-6, bounds.maxY - bounds.minY);
+    const centerX = (bounds.minX + bounds.maxX) / 2;
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+
+    this.overlayMesh.scale.set(width / 2, height / 2, 1);
+    this.overlayMesh.position.set(centerX, centerY, 0.01);
+    this.overlayMesh.visible = true;
   }
 
   setVisible(visible: boolean) {
-    this.mesh.visible = visible;
+    this.root.visible = visible;
   }
 
   update(
@@ -194,12 +281,14 @@ export class GridOverlay {
       gridMultiplier = distance * 2;
     }
 
-    this.mesh.scale.set(gridMultiplier, gridMultiplier, 1);
-    this.mesh.position.set(camera.position.x, camera.position.y, -0.01);
+    this.baseMesh.scale.set(gridMultiplier, gridMultiplier, 1);
+    this.baseMesh.position.set(camera.position.x, camera.position.y, -0.01);
   }
 
   dispose() {
-    this.mesh.geometry.dispose();
-    this.material.dispose();
+    this.baseMesh.geometry.dispose();
+    this.overlayMesh.geometry.dispose();
+    this.baseMaterial.dispose();
+    this.overlayMaterial.dispose();
   }
 }

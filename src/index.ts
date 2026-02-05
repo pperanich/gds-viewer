@@ -1,6 +1,6 @@
 export { GdsViewer } from "./lib/GdsViewer";
 export { parseGDSII } from "./lib/GDSParser";
-export { buildGeometry } from "./lib/GeometryBuilder";
+export { buildGeometry, buildGeometryAsync } from "./lib/GeometryBuilder";
 export {
   classifyLayer,
   shouldRenderLayer,
@@ -14,6 +14,11 @@ export {
   loadLypFromUrl,
   loadLypFromFile,
 } from "./lib/LypParser";
+export {
+  loadLypFromUrlInWorker,
+  loadLypFromFileInWorker,
+  parseLypFileInWorker,
+} from "./lib/LypWorkerClient";
 export type { LypLayerProperties, LypParseResult } from "./lib/LypParser";
 export type {
   GDSDocument,
