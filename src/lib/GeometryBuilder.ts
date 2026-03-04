@@ -20,6 +20,11 @@ export interface GeometryLayerPayload {
   layer: number;
   datatype: number;
   layerType: string;
+  lypTransparent: boolean;
+  lypOutline: boolean;
+  lypDitherPattern?: string;
+  lypWidth?: number;
+  lypXfill?: boolean;
   defaultVisible: boolean;
   color: string;
   opacity: number;
@@ -36,6 +41,12 @@ interface LayerBuildData {
   geometries: THREE.BufferGeometry[];
   entry: LayerStackEntry;
   classification: ReturnType<typeof classifyLayer>;
+  extentUm?: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  };
 }
 
 export function buildGeometry(
@@ -44,48 +55,104 @@ export function buildGeometry(
   options: BuildGeometryOptions = {}
 ): THREE.Group {
   const root = new THREE.Group();
-  const layerMap = buildLayerMap(layerStack);
+  const entriesBySourceKey = buildEntriesBySourceKey(layerStack);
   const unitScale = getUnitScale(layerStack.units ?? "um");
   const dbToUm = document.units.database / 1e-6;
   const zScale = options.zScale ?? 1;
 
   const layerData = new Map<string, LayerBuildData>();
+  const defaultThickness = layerStack.defaultThickness ?? 0.1;
+  let maxConfiguredZOffset = -defaultThickness * 1.1;
+  for (const layerEntry of layerStack.layers) {
+    const zOffset = layerEntry.zOffset ?? 0;
+    if (zOffset > maxConfiguredZOffset) {
+      maxConfiguredZOffset = zOffset;
+    }
+  }
+  let nextFallbackZOffset = maxConfiguredZOffset + defaultThickness * 1.1;
+  const fallbackEntries = new Map<
+    string,
+    {
+      renderKey: string;
+      entry: LayerStackEntry;
+    }
+  >();
 
   for (const cell of document.cells.values()) {
     for (const polygon of cell.polygons) {
-      const key = `${polygon.layer}:${polygon.datatype}`;
-      let entry = layerMap.get(key);
+      const sourceKey = `${polygon.layer}:${polygon.datatype}`;
+      const renderEntries = entriesBySourceKey.get(sourceKey);
+      const entries =
+        renderEntries && renderEntries.length > 0
+          ? renderEntries
+          : [
+              (() => {
+                const existingFallback = fallbackEntries.get(sourceKey);
+                if (existingFallback) return existingFallback;
 
-      let data = layerData.get(key);
-      
-      if (!data) {
-        const layerName = entry?.name ?? `Layer ${polygon.layer}/${polygon.datatype}`;
-        const classification = classifyLayer(polygon.layer, polygon.datatype, layerName);
-        
-        if (!entry) {
-          const fallbackColor = classification.isAnnotation 
-            ? "#333333" 
-            : (layerStack.defaultColor ?? generateLayerColor(polygon.layer, polygon.datatype));
-          
-          const baseZOffset = classification.zOrder * 0.01;
-          
-          entry = {
-            layer: polygon.layer,
-            datatype: polygon.datatype,
-            name: layerName,
-            thickness: layerStack.defaultThickness ?? 0.1,
-            zOffset: baseZOffset,
-            color: fallbackColor,
-          };
+                const layerName =
+                  document.layers.get(sourceKey)?.name ||
+                  `Layer ${polygon.layer}/${polygon.datatype}`;
+                const classification = classifyLayer(
+                  polygon.layer,
+                  polygon.datatype,
+                  layerName,
+                );
+                const fallbackColor = classification.isAnnotation
+                  ? "#333333"
+                  : (layerStack.defaultColor ??
+                    generateLayerColor(polygon.layer, polygon.datatype));
+
+                const entry: LayerStackEntry = {
+                  layer: polygon.layer,
+                  datatype: polygon.datatype,
+                  name: layerName,
+                  thickness: defaultThickness,
+                  zOffset: nextFallbackZOffset,
+                  color: fallbackColor,
+                };
+                nextFallbackZOffset += defaultThickness * 1.1;
+
+                const fallback = { renderKey: sourceKey, entry };
+                fallbackEntries.set(sourceKey, fallback);
+                return fallback;
+              })(),
+            ];
+
+      for (const { renderKey, entry } of entries) {
+        let data = layerData.get(renderKey);
+        if (!data) {
+          const layerName =
+            document.layers.get(sourceKey)?.name ||
+            `Layer ${polygon.layer}/${polygon.datatype}`;
+          const displayName = entry.name ?? layerName;
+          const classification = classifyLayer(
+            polygon.layer,
+            polygon.datatype,
+            displayName,
+          );
+          data = { geometries: [], entry, classification };
+          layerData.set(renderKey, data);
         }
-        
-        data = { geometries: [], entry, classification };
-        layerData.set(key, data);
-      }
 
-      const geometry = createExtrudedGeometry(polygon, data.entry, dbToUm, unitScale, zScale);
-      if (geometry) {
-        data.geometries.push(geometry);
+        const isOutlineLayer =
+          data.classification.type === "boundary" ||
+          data.entry.material?.lypOutline === true;
+        if (isOutlineLayer) {
+          data.extentUm = expandExtentFromPolygon(data.extentUm, polygon, dbToUm);
+          continue;
+        }
+
+        const geometry = createExtrudedGeometry(
+          polygon,
+          data.entry,
+          dbToUm,
+          unitScale,
+          zScale,
+        );
+        if (geometry) {
+          data.geometries.push(geometry);
+        }
       }
     }
 
@@ -99,13 +166,21 @@ export function buildGeometry(
 
   for (let i = 0; i < sortedLayers.length; i++) {
     const [key, data] = sortedLayers[i]!;
-    if (data.geometries.length === 0) continue;
+    const isOutlineLayer =
+      data.classification.type === "boundary" ||
+      data.entry.material?.lypOutline === true;
+    const geometry = isOutlineLayer
+      ? createLayerExtentGeometry(data.extentUm, data.entry, unitScale, zScale)
+      : data.geometries.length === 1
+        ? data.geometries[0]!
+        : mergeGeometries(data.geometries, false);
 
-    const mergedGeometry = data.geometries.length === 1
-      ? data.geometries[0]!
-      : mergeGeometries(data.geometries, false);
-
-    if (!mergedGeometry) continue;
+    if (!geometry) {
+      for (const geom of data.geometries) {
+        geom.dispose();
+      }
+      continue;
+    }
 
     const color = new THREE.Color(data.entry.color);
     const opacity = data.entry.material?.opacity ?? data.classification.defaultOpacity;
@@ -122,19 +197,24 @@ export function buildGeometry(
       polygonOffsetUnits: -i,
     });
 
-    const mesh = new THREE.Mesh(mergedGeometry, material);
+    const mesh = new THREE.Mesh(geometry, material);
     mesh.userData = {
       layerKey: key,
       layer: data.entry.layer,
       datatype: data.entry.datatype,
       layerType: data.classification.type,
+      lypTransparent: data.entry.material?.lypTransparent === true,
+      lypOutline: isOutlineLayer,
+      lypDitherPattern: data.entry.material?.lypDitherPattern,
+      lypWidth: data.entry.material?.lypWidth,
+      lypXfill: data.entry.material?.lypXfill,
     };
-    mesh.visible = data.classification.defaultVisible;
-    mesh.renderOrder = isTransparent ? 1000 + i : i;
+    mesh.visible = data.entry.visible ?? data.classification.defaultVisible;
+    mesh.renderOrder = i;
     root.add(mesh);
 
     for (const geom of data.geometries) {
-      if (geom !== mergedGeometry) {
+      if (geom !== geometry) {
         geom.dispose();
       }
     }
@@ -225,6 +305,11 @@ function buildGeometryFromPayload(layers: GeometryLayerPayload[]): THREE.Group {
       layer: layer.layer,
       datatype: layer.datatype,
       layerType: layer.layerType,
+      lypTransparent: layer.lypTransparent,
+      lypOutline: layer.layerType === "boundary" || layer.lypOutline,
+      lypDitherPattern: layer.lypDitherPattern,
+      lypWidth: layer.lypWidth,
+      lypXfill: layer.lypXfill,
     };
     mesh.visible = layer.defaultVisible;
     mesh.renderOrder = layer.renderOrder;
@@ -237,10 +322,50 @@ function buildGeometryFromPayload(layers: GeometryLayerPayload[]): THREE.Group {
 export function buildLayerMap(config: LayerStackConfig): Map<string, LayerStackEntry> {
   const map = new Map<string, LayerStackEntry>();
   for (const entry of config.layers) {
-    const key = `${entry.layer}:${entry.datatype}`;
-    map.set(key, entry);
+    const sourceLayer = entry.source?.layer ?? entry.layer;
+    const sourceDatatype = entry.source?.datatype ?? entry.datatype;
+    const key = `${sourceLayer}:${sourceDatatype}`;
+    const existing = map.get(key);
+    if (!existing || entry.zOffset >= existing.zOffset) {
+      map.set(key, entry);
+    }
   }
   return map;
+}
+
+function buildEntriesBySourceKey(
+  config: LayerStackConfig,
+): Map<string, Array<{ renderKey: string; entry: LayerStackEntry }>> {
+  const bySource = new Map<
+    string,
+    Array<{ renderKey: string; entry: LayerStackEntry }>
+  >();
+  const usedKeys = new Set<string>();
+
+  function uniqueKey(base: string): string {
+    if (!usedKeys.has(base)) {
+      usedKeys.add(base);
+      return base;
+    }
+    let i = 2;
+    while (usedKeys.has(`${base}#${i}`)) i++;
+    const key = `${base}#${i}`;
+    usedKeys.add(key);
+    return key;
+  }
+
+  for (const entry of config.layers) {
+    const sourceLayer = entry.source?.layer ?? entry.layer;
+    const sourceDatatype = entry.source?.datatype ?? entry.datatype;
+    const sourceKey = `${sourceLayer}:${sourceDatatype}`;
+    const baseRenderKey = (entry.id && entry.id.trim()) || sourceKey;
+    const renderKey = uniqueKey(baseRenderKey);
+    const list = bySource.get(sourceKey) ?? [];
+    list.push({ renderKey, entry });
+    bySource.set(sourceKey, list);
+  }
+
+  return bySource;
 }
 
 export function getUnitScale(units: string): number {
@@ -361,6 +486,89 @@ function createExtrudedGeometry(
   geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
   geometry.setIndex(indices);
 
+  return geometry;
+}
+
+function expandExtentFromPolygon(
+  current:
+    | {
+        minX: number;
+        minY: number;
+        maxX: number;
+        maxY: number;
+      }
+    | undefined,
+  polygon: Polygon,
+  dbToUm: number,
+): {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+} {
+  const bounds = polygon.boundingBox;
+  const minX = bounds.minX * dbToUm;
+  const minY = bounds.minY * dbToUm;
+  const maxX = bounds.maxX * dbToUm;
+  const maxY = bounds.maxY * dbToUm;
+
+  if (!current) {
+    return { minX, minY, maxX, maxY };
+  }
+
+  return {
+    minX: Math.min(current.minX, minX),
+    minY: Math.min(current.minY, minY),
+    maxX: Math.max(current.maxX, maxX),
+    maxY: Math.max(current.maxY, maxY),
+  };
+}
+
+function createLayerExtentGeometry(
+  extent:
+    | {
+        minX: number;
+        minY: number;
+        maxX: number;
+        maxY: number;
+      }
+    | undefined,
+  entry: LayerStackEntry,
+  unitScale: number,
+  zScale: number
+): THREE.BufferGeometry | null {
+  if (!extent) return null;
+
+  const width = extent.maxX - extent.minX;
+  const height = extent.maxY - extent.minY;
+  if (width <= 1e-12 || height <= 1e-12) return null;
+
+  const z = (entry.zOffset + entry.thickness) * unitScale * zScale + 1e-4;
+
+  const geometry = new THREE.BufferGeometry();
+  const positions = [
+    extent.minX,
+    extent.minY,
+    z,
+    extent.maxX,
+    extent.minY,
+    z,
+    extent.maxX,
+    extent.maxY,
+    z,
+    extent.minX,
+    extent.maxY,
+    z,
+  ];
+  const normals = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1];
+  const indices = [0, 1, 2, 0, 2, 3];
+
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3)
+  );
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
   return geometry;
 }
 

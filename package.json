@@ -13,9 +13,11 @@
     "dev": "bunx --bun vite",
     "build": "bunx --bun vite build",
     "preview": "bunx --bun vite preview",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
+    "clipper-lib": "^6.4.2",
     "earcut": "^3.0.1",
     "gdsii": "^0.1.0",
     "three": "^0.170.0"

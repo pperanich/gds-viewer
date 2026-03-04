@@ -1,11 +1,24 @@
 import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { GDSDocument, LayerStackConfig, TextElement } from "../types/gds";
+import type {
+  GDSDocument,
+  LayerStackConfig,
+  LayerStackEntry,
+  ProcessStackConfig,
+  DerivedGeometrySchema,
+  TextElement,
+} from "../types/gds";
 import { parseGDSII } from "./GDSParser";
 import { buildGeometryAsync, buildLayerMap, getUnitScale } from "./GeometryBuilder";
 import { classifyLayer, getTypeColor } from "./LayerClassifier";
-import { lypToLayerStack } from "./LypParser";
+import { lypToLayerStack, type LypParseResult } from "./LypParser";
+import {
+  derivedGeometryToLayerStack,
+  isDerivedGeometrySchema,
+} from "./DerivedGeometry";
+import { buildDerivedModel } from "./DerivedGeometryModel";
+import { processStackToLayerStack } from "./ProcessStack";
 import {
   loadLypFromUrlInWorker,
   loadLypFromFileInWorker,
@@ -26,9 +39,15 @@ export class GdsViewer extends HTMLElement {
   private modelGroup: THREE.Group | null = null;
   private textGroup: THREE.Group | null = null;
   private resizeObserver: ResizeObserver;
+  private chipBackdrop: THREE.Mesh;
+  private chipBackdropMaterial: THREE.MeshBasicMaterial;
 
   private gdsDocument: GDSDocument | null = null;
   private layerStack: LayerStackConfig | null = null;
+  private lypResult: LypParseResult | null = null;
+  private derivedSchema: DerivedGeometrySchema | null = null;
+  private derivedUiGroups: Map<string, string> | null = null;
+  private derivedWarnings: string[] = [];
   private layerVisibility: Map<string, boolean> = new Map();
   private textLayerGroups: Map<string, TextLayerGroup> = new Map();
 
@@ -41,6 +60,13 @@ export class GdsViewer extends HTMLElement {
   private layerPanel: HTMLDivElement;
   private controlsPanel: HTMLDivElement;
   private layersCollapsed: boolean = false;
+  private meshMaterialState = new WeakMap<
+    THREE.Mesh,
+    {
+      opacity: number;
+      transparent: boolean;
+    }
+  >();
 
   private zScale: number = 1;
   private darkMode: boolean = false;
@@ -51,7 +77,17 @@ export class GdsViewer extends HTMLElement {
   private buildToken: number = 0;
 
   static get observedAttributes() {
-    return ["gds-url", "layer-stack-url", "lyp-url", "layers-collapsed", "theme"];
+    return [
+      "gds-url",
+      "derived-geometry-url",
+      "derived-geometry-overlay-mode",
+      "process-stack-url",
+      "layer-stack-url",
+      "lyp-url",
+      "lyp-layer-ordering",
+      "layers-collapsed",
+      "theme",
+    ];
   }
 
   constructor() {
@@ -83,12 +119,13 @@ export class GdsViewer extends HTMLElement {
         --gds-ruler-font-size: 12px;
         
         --gds-grid-color-light: #aaaaaa;
-        --gds-grid-color-dark: #888888;
+        --gds-grid-color-dark: #aaaaaa;
         --gds-grid-opacity: 0.4;
-        --gds-grid-overlay-color-light: #8b5cf6;
-        --gds-grid-overlay-color-dark: #e9d5ff;
-        --gds-grid-overlay-opacity: 0.18;
-        
+        --gds-2d-opacity-scale: 0.72;
+        --gds-2d-opacity-min: 0.16;
+        --gds-chip-backdrop-color-dark: #ffffff;
+        --gds-chip-backdrop-opacity-dark: 0.9;
+
         --gds-measure-color: #ff6600;
         --gds-measure-line-width: 3;
         --gds-measure-font: monospace;
@@ -141,6 +178,23 @@ export class GdsViewer extends HTMLElement {
 
     this.gridOverlay = new GridOverlay();
     this.scene.add(this.gridOverlay.getObject());
+
+    this.chipBackdropMaterial = new THREE.MeshBasicMaterial({
+      color: "#ffffff",
+      side: THREE.DoubleSide,
+      transparent: false,
+      opacity: 1,
+      depthWrite: false,
+      depthTest: true,
+    });
+    this.chipBackdrop = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      this.chipBackdropMaterial,
+    );
+    this.chipBackdrop.visible = false;
+    this.chipBackdrop.renderOrder = -0.5;
+    this.chipBackdrop.position.set(0, 0, -1);
+    this.scene.add(this.chipBackdrop);
 
     this.perspectiveCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 10000);
     this.perspectiveCamera.position.set(0, 0, 100);
@@ -202,16 +256,30 @@ export class GdsViewer extends HTMLElement {
     this.renderer.dispose();
     this.controls.dispose();
     this.gridOverlay.dispose();
+    this.chipBackdrop.geometry.dispose();
+    this.chipBackdropMaterial.dispose();
     this.measurementTool.dispose();
   }
 
   attributeChangedCallback(name: string, _oldValue: string, _newValue: string) {
-    if (
-      name === "gds-url" ||
-      name === "layer-stack-url" ||
-      name === "lyp-url"
-    ) {
-      this.loadFromAttributes();
+	    if (
+	      name === "gds-url" ||
+	      name === "derived-geometry-url" ||
+	      name === "process-stack-url" ||
+	      name === "layer-stack-url" ||
+	      name === "lyp-url"
+	    ) {
+	      this.loadFromAttributes();
+      return;
+    }
+    if (name === "derived-geometry-overlay-mode") {
+      if (this.derivedSchema && this.gdsDocument) {
+        void this.buildAndRenderModel();
+      }
+      return;
+    }
+    if (name === "lyp-layer-ordering") {
+      void this.handleLypLayerOrderingChanged();
       return;
     }
     if (name === "layers-collapsed") {
@@ -223,10 +291,12 @@ export class GdsViewer extends HTMLElement {
     }
   }
 
-  private async loadFromAttributes() {
-    const gdsUrl = this.getAttribute("gds-url");
-    const layerStackUrl = this.getAttribute("layer-stack-url");
-    const lypUrl = this.getAttribute("lyp-url");
+	  private async loadFromAttributes() {
+	    const gdsUrl = this.getAttribute("gds-url");
+	    const derivedGeometryUrl = this.getAttribute("derived-geometry-url");
+	    const processStackUrl = this.getAttribute("process-stack-url");
+	    const layerStackUrl = this.getAttribute("layer-stack-url");
+	    const lypUrl = this.getAttribute("lyp-url");
 
     if (!gdsUrl) return;
 
@@ -235,21 +305,45 @@ export class GdsViewer extends HTMLElement {
         .then((r) => r.arrayBuffer())
         .then((buffer) => parseGDSII(buffer));
 
-      const layerStackPromise = lypUrl
-        ? loadLypFromUrlInWorker(lypUrl).then((lypResult) =>
-            lypToLayerStack(lypResult),
-          )
-        : layerStackUrl
-          ? fetch(layerStackUrl).then((r) => r.json())
-          : Promise.resolve<LayerStackConfig | null>(null);
+	      const layerStackPromise = lypUrl
+	        ? loadLypFromUrlInWorker(lypUrl).then((lypResult) => {
+	            this.lypResult = lypResult;
+	            this.derivedSchema = null;
+	            this.derivedUiGroups = null;
+	            this.derivedWarnings = [];
+	            return this.createLayerStackFromLyp(lypResult);
+	          })
+	        : derivedGeometryUrl
+	          ? fetch(derivedGeometryUrl)
+	              .then((r) => r.json())
+	              .then((json) => this.createLayerStackFromDerivedGeometry(json))
+	        : processStackUrl
+	          ? fetch(processStackUrl)
+	              .then((r) => r.json())
+	              .then((json) => this.createLayerStackFromProcessStack(json))
+	        : layerStackUrl
+	          ? fetch(layerStackUrl).then((r) => {
+	              this.lypResult = null;
+	              this.derivedSchema = null;
+	              this.derivedUiGroups = null;
+	              this.derivedWarnings = [];
+	              return r.json();
+	            })
+	          : Promise.resolve<LayerStackConfig | null>(null);
 
       const [gdsDocument, layerStack] = await Promise.all([
         gdsPromise,
         layerStackPromise,
       ]);
 
-      this.gdsDocument = gdsDocument;
-      this.layerStack = layerStack ?? this.createDefaultLayerStack();
+	      this.gdsDocument = gdsDocument;
+	      this.layerStack = layerStack ?? this.createDefaultLayerStack();
+	      if (!lypUrl && !derivedGeometryUrl && !processStackUrl && !layerStackUrl) {
+	        this.lypResult = null;
+	        this.derivedSchema = null;
+	        this.derivedUiGroups = null;
+	        this.derivedWarnings = [];
+	      }
 
       await this.buildAndRenderModel();
     } catch (error) {
@@ -271,10 +365,6 @@ export class GdsViewer extends HTMLElement {
         );
         return { layer, classification };
       },
-    );
-
-    layerEntries.sort(
-      (a, b) => a.classification.zOrder - b.classification.zOrder,
     );
 
     const layers: LayerStackConfig["layers"] = [];
@@ -307,6 +397,145 @@ export class GdsViewer extends HTMLElement {
     return { layers, units: "um", defaultThickness: 0.2 };
   }
 
+  private getLypLayerOrderingFromAttribute():
+    | "lyp"
+    | "lyp-reverse"
+    | "classification" {
+    const value = this.getAttribute("lyp-layer-ordering")?.trim().toLowerCase();
+    if (value === "lyp" || value === "lyp-reverse" || value === "classification") {
+      return value;
+    }
+    return "lyp-reverse";
+  }
+
+  private getDerivedGeometryOverlayModeFromAttribute():
+    | "nominal"
+    | "typical"
+    | "max" {
+    const value = this
+      .getAttribute("derived-geometry-overlay-mode")
+      ?.trim()
+      .toLowerCase();
+    if (value === "nominal" || value === "typical" || value === "max") {
+      return value;
+    }
+    return "typical";
+  }
+
+	  private createLayerStackFromLyp(lypResult: LypParseResult): LayerStackConfig {
+	    return lypToLayerStack(lypResult, {
+	      layerOrdering: this.getLypLayerOrderingFromAttribute(),
+	    });
+	  }
+
+	  private createLayerStackFromDerivedGeometry(
+	    derivedGeometry: unknown,
+	  ): LayerStackConfig {
+	    if (!isDerivedGeometrySchema(derivedGeometry)) {
+	      throw new Error(
+	        'Invalid derived-geometry JSON: expected format "gds-viewer-derived-geometry@1"',
+	      );
+	    }
+	    this.derivedSchema = derivedGeometry;
+	    const result = derivedGeometryToLayerStack(derivedGeometry);
+	    this.lypResult = null;
+	    this.derivedUiGroups = result.uiGroups;
+	    this.derivedWarnings = result.warnings;
+	    if (result.warnings.length > 0) {
+	      console.warn(
+	        "Derived geometry conversion warnings:",
+	        result.warnings,
+	      );
+	    }
+	    return result.layerStack;
+	  }
+
+	  private createLayerStackFromProcessStack(
+	    processStack: unknown,
+	  ): LayerStackConfig {
+    if (
+      !processStack ||
+      typeof processStack !== "object" ||
+      !Array.isArray((processStack as { layers?: unknown }).layers)
+    ) {
+      throw new Error(
+        "Invalid process stack JSON: expected object with a layers array",
+      );
+    }
+    const typedProcessStack = processStack as ProcessStackConfig;
+    const converted = processStackToLayerStack(typedProcessStack);
+	    const merged = this.mergeProcessStackWithExisting(
+	      typedProcessStack,
+	      converted,
+	      this.layerStack,
+	    );
+	    this.lypResult = null;
+	    this.derivedSchema = null;
+	    this.derivedUiGroups = null;
+	    this.derivedWarnings = [];
+	    return merged;
+	  }
+
+  private mergeProcessStackWithExisting(
+    processStack: ProcessStackConfig,
+    processLayerStack: LayerStackConfig,
+    existingLayerStack: LayerStackConfig | null,
+  ): LayerStackConfig {
+    if (!existingLayerStack || existingLayerStack.layers.length === 0) {
+      return processLayerStack;
+    }
+
+    const existingByKey = new Map(
+      existingLayerStack.layers.map((layer) => [
+        `${layer.layer}:${layer.datatype}`,
+        layer,
+      ]),
+    );
+    const processKeys = new Set(
+      processStack.layers.map((layer) => `${layer.layer}:${layer.datatype}`),
+    );
+
+    const mergedLayers = processLayerStack.layers.map((layer, index) => {
+      const processLayer = processStack.layers[index];
+      const key = `${layer.layer}:${layer.datatype}`;
+      const existing = existingByKey.get(key);
+      if (!processLayer || !existing) return layer;
+
+      return {
+        ...layer,
+        color: processLayer.color ?? existing.color,
+        visible:
+          processLayer.visible !== undefined ? layer.visible : existing.visible,
+        material:
+          processLayer.material !== undefined
+            ? { ...existing.material, ...layer.material }
+            : existing.material,
+      };
+    });
+
+    for (const existingLayer of existingLayerStack.layers) {
+      const key = `${existingLayer.layer}:${existingLayer.datatype}`;
+      if (!processKeys.has(key)) {
+        mergedLayers.push(existingLayer);
+      }
+    }
+
+    return {
+      ...processLayerStack,
+      layers: mergedLayers,
+      defaultColor:
+        processLayerStack.defaultColor ?? existingLayerStack.defaultColor,
+    };
+  }
+
+  private async handleLypLayerOrderingChanged() {
+    if (!this.lypResult) return;
+    this.layerStack = this.createLayerStackFromLyp(this.lypResult);
+    if (this.gdsDocument) {
+      await this.buildAndRenderModel();
+    }
+  }
+
   private getThicknessForType(type: string, defaultThickness: number): number {
     switch (type) {
       case "well":
@@ -334,28 +563,49 @@ export class GdsViewer extends HTMLElement {
     }
   }
 
-  private async buildAndRenderModel() {
-    if (!this.gdsDocument || !this.layerStack) return;
+	  private async buildAndRenderModel() {
+	    if (!this.gdsDocument || !this.layerStack) return;
 
-    const token = ++this.buildToken;
+	    const token = ++this.buildToken;
 
-    const nextModel = await buildGeometryAsync(
-      this.gdsDocument,
-      this.layerStack,
-      {
-        zScale: this.baseZScale,
-      },
-    );
+	    let nextModel: THREE.Group;
+	    let nextLayerStack: LayerStackConfig | null = null;
 
-    if (token !== this.buildToken) {
-      this.disposeGroup(nextModel);
-      return;
-    }
+	    if (this.derivedSchema) {
+	      const result = buildDerivedModel(this.gdsDocument, this.derivedSchema, {
+	        zScale: this.baseZScale,
+          overlayMode: this.getDerivedGeometryOverlayModeFromAttribute(),
+	      });
+	      nextModel = result.group;
+	      nextLayerStack = result.layerStack;
+	      this.derivedUiGroups = result.uiGroups;
+	      this.derivedWarnings = result.warnings;
+	      if (result.warnings.length > 0) {
+	        console.warn("Derived geometry warnings:", result.warnings);
+	      }
+	    } else {
+	      nextModel = await buildGeometryAsync(
+	        this.gdsDocument,
+	        this.layerStack,
+	        {
+	          zScale: this.baseZScale,
+	        },
+	      );
+	    }
 
-    if (this.modelGroup) {
-      this.scene.remove(this.modelGroup);
-      this.disposeGroup(this.modelGroup);
-    }
+	    if (token !== this.buildToken) {
+	      this.disposeGroup(nextModel);
+	      return;
+	    }
+
+	    if (nextLayerStack) {
+	      this.layerStack = nextLayerStack;
+	    }
+
+	    if (this.modelGroup) {
+	      this.scene.remove(this.modelGroup);
+	      this.disposeGroup(this.modelGroup);
+	    }
 
     if (this.textGroup) {
       this.scene.remove(this.textGroup);
@@ -365,7 +615,14 @@ export class GdsViewer extends HTMLElement {
     this.modelGroup = nextModel;
     this.modelGroup.scale.z = this.zScale;
     this.scene.add(this.modelGroup);
-    this.updateGridOverlayBounds();
+    this.updateChipBackdropBounds();
+
+    if (this.is2DMode) {
+      this.modelGroup.scale.z = 0.001;
+      this.apply2DCompositing();
+    } else {
+      this.apply2DCompositing();
+    }
 
     this.fitCameraToModel();
 
@@ -525,26 +782,32 @@ export class GdsViewer extends HTMLElement {
     const gridLight =
       styles.getPropertyValue("--gds-grid-color-light").trim() || "#aaaaaa";
     const gridDark =
-      styles.getPropertyValue("--gds-grid-color-dark").trim() || "#888888";
-    const gridOverlayLight =
-      styles.getPropertyValue("--gds-grid-overlay-color-light").trim() ||
-      "#8b5cf6";
-    const gridOverlayDark =
-      styles.getPropertyValue("--gds-grid-overlay-color-dark").trim() ||
-      "#e9d5ff";
+      styles.getPropertyValue("--gds-grid-color-dark").trim() || "#aaaaaa";
     const gridOpacity =
       parseFloat(styles.getPropertyValue("--gds-grid-opacity").trim()) || 0.4;
-    const gridOverlayOpacity =
-      parseFloat(styles.getPropertyValue("--gds-grid-overlay-opacity").trim()) ||
-      0.18;
     const gridColor = this.darkMode ? gridDark : gridLight;
-    const gridOverlayColor = this.darkMode ? gridOverlayDark : gridOverlayLight;
     this.gridOverlay.setColor(
       gridColor,
       gridOpacity,
-      gridOverlayOpacity,
-      gridOverlayColor,
     );
+
+    const chipBackdropColorDark =
+      styles.getPropertyValue("--gds-chip-backdrop-color-dark").trim() ||
+      "#ffffff";
+    const chipBackdropOpacityDark =
+      parseFloat(
+        styles.getPropertyValue("--gds-chip-backdrop-opacity-dark").trim(),
+      ) || 0.9;
+    const isChipBackdropTransparent = chipBackdropOpacityDark < 0.999;
+    this.chipBackdropMaterial.color.set(chipBackdropColorDark);
+    if (this.chipBackdropMaterial.transparent !== isChipBackdropTransparent) {
+      this.chipBackdropMaterial.transparent = isChipBackdropTransparent;
+      this.chipBackdropMaterial.needsUpdate = true;
+    }
+    this.chipBackdropMaterial.opacity = isChipBackdropTransparent
+      ? chipBackdropOpacityDark
+      : 1;
+    this.updateChipBackdropBounds();
 
     this.measurementTool.updateStylesFromCSS();
   }
@@ -577,69 +840,248 @@ export class GdsViewer extends HTMLElement {
     }
   }
 
-  private updateGridOverlayBounds() {
+	  private updateChipBackdropBounds() {
     if (!this.gdsDocument) {
-      this.gridOverlay.setOverlayBounds(null);
+      this.chipBackdrop.visible = false;
       return;
     }
 
     const dbToUm = this.gdsDocument.units.database / 1e-6;
     const bounds = this.gdsDocument.boundingBox;
-    this.gridOverlay.setOverlayBounds({
-      minX: bounds.minX * dbToUm,
-      maxX: bounds.maxX * dbToUm,
-      minY: bounds.minY * dbToUm,
-      maxY: bounds.maxY * dbToUm,
-    });
-  }
+    const minX = bounds.minX * dbToUm;
+    const maxX = bounds.maxX * dbToUm;
+    const minY = bounds.minY * dbToUm;
+    const maxY = bounds.maxY * dbToUm;
+    const width = Math.max(1e-6, maxX - minX);
+    const height = Math.max(1e-6, maxY - minY);
 
-  private initLayerVisibility() {
-    this.layerVisibility.clear();
-    if (this.gdsDocument && this.layerStack) {
-      const layerMap = new Map(
-        this.layerStack.layers.map((l) => [`${l.layer}:${l.datatype}`, l]),
-      );
+    this.chipBackdrop.scale.set(width, height, 1);
+    this.chipBackdrop.position.set(
+      (minX + maxX) / 2,
+      (minY + maxY) / 2,
+      -1,
+    );
+	    this.chipBackdrop.visible = this.darkMode;
+	  }
 
-      for (const [key, layer] of this.gdsDocument.layers) {
-        const stackEntry = layerMap.get(key);
-        const name = stackEntry?.name ?? layer.name;
-        const classification = classifyLayer(layer.layer, layer.datatype, name);
-        this.layerVisibility.set(key, classification.defaultVisible);
-      }
-    }
-  }
+	  private getLayerPanelEntries(): Array<{
+	    renderKey: string;
+	    sourceKey: string;
+	    name: string;
+	    zOffset: number;
+	    color: string;
+	    stackEntry: LayerStackEntry | null;
+	    classification: ReturnType<typeof classifyLayer>;
+	    isTextLayer: boolean;
+	  }> {
+	    if (!this.gdsDocument || !this.layerStack) return [];
 
-  private updateLayerPanel() {
-    if (!this.gdsDocument || !this.layerStack) {
+	    const usedKeys = new Set<string>();
+	    const entriesBySource = new Map<
+	      string,
+	      Array<{ renderKey: string; entry: LayerStackEntry }>
+	    >();
+
+	    function uniqueKey(base: string): string {
+	      if (!usedKeys.has(base)) {
+	        usedKeys.add(base);
+	        return base;
+	      }
+	      let i = 2;
+	      while (usedKeys.has(`${base}#${i}`)) i++;
+	      const key = `${base}#${i}`;
+	      usedKeys.add(key);
+	      return key;
+	    }
+
+	    for (const entry of this.layerStack.layers) {
+	      const sourceLayer = entry.source?.layer ?? entry.layer;
+	      const sourceDatatype = entry.source?.datatype ?? entry.datatype;
+	      const sourceKey = `${sourceLayer}:${sourceDatatype}`;
+	      const baseRenderKey = (entry.id && entry.id.trim()) || sourceKey;
+	      const renderKey = uniqueKey(baseRenderKey);
+	      const list = entriesBySource.get(sourceKey) ?? [];
+	      list.push({ renderKey, entry });
+	      entriesBySource.set(sourceKey, list);
+	    }
+
+	    const defaultThickness = this.layerStack.defaultThickness ?? 0.1;
+	    let maxConfiguredZOffset = -defaultThickness * 1.1;
+	    for (const entry of this.layerStack.layers) {
+	      if (entry.zOffset > maxConfiguredZOffset) {
+	        maxConfiguredZOffset = entry.zOffset;
+	      }
+	    }
+	    let nextFallbackZOffset = maxConfiguredZOffset + defaultThickness * 1.1;
+
+		    const results: Array<{
+		      renderKey: string;
+		      sourceKey: string;
+		      name: string;
+	      zOffset: number;
+	      color: string;
+	      stackEntry: LayerStackEntry | null;
+	      classification: ReturnType<typeof classifyLayer>;
+		      isTextLayer: boolean;
+		    }> = [];
+		    const seenSourceKeys = new Set<string>();
+
+		    for (const [sourceKey, layer] of this.gdsDocument.layers) {
+		      seenSourceKeys.add(sourceKey);
+		      const renderEntries = entriesBySource.get(sourceKey);
+		      const hasTexts = this.textLayerGroups.has(sourceKey);
+
+	      if (renderEntries && renderEntries.length > 0) {
+	        const hasSourceKeyEntry = renderEntries.some(
+	          (item) => item.renderKey === sourceKey,
+	        );
+	        const layerName = layer.name ?? sourceKey;
+	        let maxZ = -Infinity;
+
+	        for (const { renderKey, entry } of renderEntries) {
+	          const name = entry.name ?? layerName;
+	          const classification = classifyLayer(layer.layer, layer.datatype, name);
+	          results.push({
+	            renderKey,
+	            sourceKey,
+	            name,
+	            zOffset: entry.zOffset,
+	            color: entry.color,
+	            stackEntry: entry,
+	            classification,
+	            isTextLayer: hasTexts && hasSourceKeyEntry && renderKey === sourceKey,
+	          });
+	          maxZ = Math.max(maxZ, entry.zOffset);
+	        }
+
+	        if (hasTexts && !hasSourceKeyEntry) {
+	          const textClassification =
+	            this.textLayerGroups.get(sourceKey)?.classification ??
+	            classifyLayer(layer.layer, layer.datatype, `${layerName} (Text)`);
+	          results.push({
+	            renderKey: sourceKey,
+	            sourceKey,
+	            name: `${layerName} (Text)`,
+	            zOffset: Number.isFinite(maxZ) ? maxZ + 1e-6 : 0,
+	            color: "#4a4a8a",
+	            stackEntry: null,
+	            classification: textClassification,
+	            isTextLayer: true,
+	          });
+	        }
+
+	        continue;
+	      }
+
+	      const name = layer.name ?? sourceKey;
+	      const classification = classifyLayer(layer.layer, layer.datatype, name);
+	      const color =
+	        layer.color ||
+	        (classification.isAnnotation ? "#333333" : getTypeColor(classification.type));
+	      results.push({
+	        renderKey: sourceKey,
+	        sourceKey,
+	        name,
+	        zOffset: nextFallbackZOffset,
+	        color,
+	        stackEntry: null,
+	        classification,
+	        isTextLayer: hasTexts,
+	      });
+		      nextFallbackZOffset += defaultThickness * 1.1;
+		    }
+
+		    for (const [sourceKey, renderEntries] of entriesBySource) {
+		      if (seenSourceKeys.has(sourceKey)) continue;
+		      const [layerStr, datatypeStr] = sourceKey.split(":");
+		      const layerNum = parseInt(layerStr ?? "0", 10);
+		      const datatypeNum = parseInt(datatypeStr ?? "0", 10);
+
+		      for (const { renderKey, entry } of renderEntries) {
+		        const name = entry.name ?? renderKey;
+		        const classification = classifyLayer(layerNum, datatypeNum, name);
+		        results.push({
+		          renderKey,
+		          sourceKey,
+		          name,
+		          zOffset: entry.zOffset,
+		          color: entry.color,
+		          stackEntry: entry,
+		          classification,
+		          isTextLayer: false,
+		        });
+		      }
+		    }
+
+		    return results;
+		  }
+
+	  private applyLayerVisibility() {
+	    const map = this.layerVisibility;
+
+	    if (this.modelGroup) {
+	      this.modelGroup.traverse((obj) => {
+	        if (
+	          (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) &&
+	          typeof obj.userData["layerKey"] === "string"
+	        ) {
+	          const key = obj.userData["layerKey"] as string;
+	          const visible = map.get(key);
+	          if (visible !== undefined) {
+	            obj.visible = visible;
+	          }
+	        }
+	      });
+	    }
+
+	    if (this.textGroup) {
+	      this.textGroup.traverse((obj) => {
+	        if (
+	          obj instanceof THREE.Group &&
+	          typeof obj.userData["layerKey"] === "string"
+	        ) {
+	          const key = obj.userData["layerKey"] as string;
+	          const visible = map.get(key);
+	          if (visible !== undefined) {
+	            obj.visible = visible;
+	          }
+	        }
+	      });
+	    }
+	  }
+
+	  private initLayerVisibility() {
+	    const previous = new Map(this.layerVisibility);
+	    this.layerVisibility.clear();
+	    const entries = this.getLayerPanelEntries();
+	    for (const entry of entries) {
+	      const defaultVisible =
+	        entry.stackEntry?.visible ?? entry.classification.defaultVisible;
+	      const visible = previous.get(entry.renderKey) ?? defaultVisible;
+	      this.layerVisibility.set(entry.renderKey, visible);
+	    }
+	    this.applyLayerVisibility();
+	  }
+
+	  private updateLayerPanel() {
+	    if (!this.gdsDocument || !this.layerStack) {
       this.layerPanel.innerHTML = this.renderLayerPanelShell(
         "<div>No data</div>",
       );
       this.bindLayerPanelControls();
-      return;
-    }
+	      return;
+	    }
 
-    const layerMap = new Map(
-      this.layerStack.layers.map((l) => [`${l.layer}:${l.datatype}`, l]),
-    );
-
-    const layerEntries = Array.from(this.gdsDocument.layers.entries()).map(
-      ([key, layer]) => {
-        const stackEntry = layerMap.get(key);
-        const name = stackEntry?.name ?? layer.name ?? key;
-        const zOffset = stackEntry?.zOffset ?? 0;
-        const classification = classifyLayer(layer.layer, layer.datatype, name);
-        const isTextLayer = this.textLayerGroups.has(key);
-        return {
-          key,
-          layer,
-          stackEntry,
-          name,
-          zOffset,
-          classification,
-          isTextLayer,
-        };
-      },
-    );
+	    const layerEntries = this.getLayerPanelEntries().map((entry) => ({
+	      key: entry.renderKey,
+	      sourceKey: entry.sourceKey,
+	      name: entry.name,
+	      zOffset: entry.zOffset,
+	      classification: entry.classification,
+	      color: entry.color,
+	      group: entry.stackEntry?.group,
+	      isTextLayer: entry.isTextLayer,
+	    }));
 
     const typeGroups = new Map<string, typeof layerEntries>();
     const typeOrder = [
@@ -698,7 +1140,14 @@ export class GdsViewer extends HTMLElement {
       unknown: "Other",
     };
 
-    let contentHtml = "";
+	    let contentHtml = "";
+	    if (this.derivedWarnings.length > 0) {
+	      contentHtml += `
+	        <div style="margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(255,153,0,0.15);color:#ffcc80;font-size:11px;line-height:1.3;">
+	          Derived geometry loaded with ${this.derivedWarnings.length} warning(s). See console for details.
+	        </div>
+	      `;
+	    }
 
     for (const type of typeOrder) {
       const group = typeGroups.get(type);
@@ -718,20 +1167,25 @@ export class GdsViewer extends HTMLElement {
           <div class="layer-group-content" id="${groupId}">
       `;
 
-      for (const {
-        key,
-        layer,
-        stackEntry,
-        name,
-        classification,
-        isTextLayer,
-      } of group) {
-        const color = stackEntry?.color ?? layer.color;
-        const checked = this.layerVisibility.get(key) ? "checked" : "";
-        const dimStyle = classification.isAnnotation ? "opacity:0.6;" : "";
-        const textBadge = isTextLayer
-          ? '<span style="font-size:9px;background:#4a4a8a;padding:1px 4px;border-radius:3px;margin-left:4px;">TEXT</span>'
-          : "";
+	      for (const {
+	        key,
+	        name,
+	        classification,
+	        isTextLayer,
+	        color,
+	        group: entryGroup,
+	      } of group) {
+	        const checked = this.layerVisibility.get(key) ? "checked" : "";
+	        const dimStyle = classification.isAnnotation ? "opacity:0.6;" : "";
+	        const textBadge = isTextLayer
+	          ? '<span style="font-size:9px;background:#4a4a8a;padding:1px 4px;border-radius:3px;margin-left:4px;">TEXT</span>'
+	          : "";
+	        const groupLabel = entryGroup
+	          ? (this.derivedUiGroups?.get(entryGroup) ?? entryGroup)
+	          : null;
+	        const groupBadge = groupLabel
+	          ? `<span style="font-size:9px;background:#2b7a4b;padding:1px 4px;border-radius:3px;margin-left:4px;">${groupLabel}</span>`
+	          : "";
 
         contentHtml += `
           <label style="display:flex;align-items:center;margin-top:6px;cursor:pointer;padding-left:16px;${dimStyle}">
@@ -739,10 +1193,10 @@ export class GdsViewer extends HTMLElement {
               style="margin-right:8px;cursor:pointer;">
             <span style="width:12px;height:12px;background:${color};
               border-radius:2px;margin-right:8px;flex-shrink:0;"></span>
-            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;">${name}${textBadge}</span>
-          </label>
-        `;
-      }
+	            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;">${name}${textBadge}${groupBadge}</span>
+	          </label>
+	        `;
+	      }
 
       contentHtml += "</div></div>";
     }
@@ -835,7 +1289,7 @@ export class GdsViewer extends HTMLElement {
     if (this.modelGroup) {
       this.modelGroup.traverse((obj) => {
         if (
-          obj instanceof THREE.Mesh &&
+          (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) &&
           obj.userData["layerKey"] === layerKey
         ) {
           obj.visible = visible;
@@ -1009,6 +1463,7 @@ export class GdsViewer extends HTMLElement {
     if (this.is2DMode) {
       this.modelGroup?.scale.setZ(0.001);
       this.textGroup?.scale.setZ(0.001);
+      this.apply2DCompositing();
 
       this.activeCamera = this.orthoCamera;
       this.controls.object = this.activeCamera;
@@ -1028,6 +1483,7 @@ export class GdsViewer extends HTMLElement {
     } else {
       this.modelGroup?.scale.setZ(this.zScale);
       this.textGroup?.scale.setZ(this.zScale);
+      this.apply2DCompositing();
 
       this.activeCamera = this.perspectiveCamera;
       this.controls.object = this.activeCamera;
@@ -1045,6 +1501,54 @@ export class GdsViewer extends HTMLElement {
     }
 
     this.updateControlsPanel();
+  }
+
+  private apply2DCompositing() {
+    if (!this.modelGroup) return;
+
+    const styles = getComputedStyle(this);
+    const scaleRaw = parseFloat(
+      styles.getPropertyValue("--gds-2d-opacity-scale").trim(),
+    );
+    const minOpacityRaw = parseFloat(
+      styles.getPropertyValue("--gds-2d-opacity-min").trim(),
+    );
+    const scale = Number.isFinite(scaleRaw)
+      ? THREE.MathUtils.clamp(scaleRaw, 0.05, 1)
+      : 0.72;
+    const minOpacity = Number.isFinite(minOpacityRaw)
+      ? THREE.MathUtils.clamp(minOpacityRaw, 0, 1)
+      : 0.16;
+
+    this.modelGroup.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      if (!(obj.material instanceof THREE.MeshBasicMaterial)) return;
+
+      const material = obj.material;
+      const previous = this.meshMaterialState.get(obj);
+      if (!previous) {
+        this.meshMaterialState.set(obj, {
+          opacity: material.opacity,
+          transparent: material.transparent,
+        });
+      }
+
+      const baseOpacity = previous?.opacity ?? material.opacity;
+      const targetOpacity = THREE.MathUtils.clamp(
+        baseOpacity * scale,
+        minOpacity,
+        1,
+      );
+      const transparent = targetOpacity < 0.999;
+      const transparentChanged = material.transparent !== transparent;
+
+      material.opacity = targetOpacity;
+      material.transparent = transparent;
+
+      if (transparentChanged) {
+        material.needsUpdate = true;
+      }
+    });
   }
 
   private switchTo2DView(preservedTarget: THREE.Vector3) {
@@ -1136,6 +1640,13 @@ export class GdsViewer extends HTMLElement {
         } else {
           obj.material.dispose();
         }
+      } else if (obj instanceof THREE.LineSegments) {
+        obj.geometry.dispose();
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m) => m.dispose());
+        } else {
+          obj.material.dispose();
+        }
       } else if (obj instanceof THREE.Sprite) {
         const material = obj.material as THREE.SpriteMaterial;
         if (material.map) material.map.dispose();
@@ -1147,6 +1658,10 @@ export class GdsViewer extends HTMLElement {
   async loadGdsFile(file: File): Promise<void> {
     const buffer = await file.arrayBuffer();
     this.gdsDocument = await parseGDSII(buffer);
+    this.lypResult = null;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
     this.layerStack = this.createDefaultLayerStack();
     await this.buildAndRenderModel();
   }
@@ -1155,52 +1670,129 @@ export class GdsViewer extends HTMLElement {
     const gdsPromise = gdsFile
       .arrayBuffer()
       .then((buffer) => parseGDSII(buffer));
-    const lypPromise = loadLypFromFileInWorker(lypFile).then((lypResult) =>
-      lypToLayerStack(lypResult),
-    );
+    const lypPromise = loadLypFromFileInWorker(lypFile);
 
-    const [gdsDocument, layerStack] = await Promise.all([
+    const [gdsDocument, lypResult] = await Promise.all([
       gdsPromise,
       lypPromise,
     ]);
 
     this.gdsDocument = gdsDocument;
-    this.layerStack = layerStack;
+    this.lypResult = lypResult;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromLyp(lypResult);
     await this.buildAndRenderModel();
   }
 
   async loadGdsBuffer(buffer: ArrayBuffer): Promise<void> {
     this.gdsDocument = await parseGDSII(buffer);
+    this.lypResult = null;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
     this.layerStack = this.createDefaultLayerStack();
     await this.buildAndRenderModel();
   }
 
   setLayerStack(config: LayerStackConfig): void {
+    this.lypResult = null;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
     this.layerStack = config;
     if (this.gdsDocument) {
       void this.buildAndRenderModel();
     }
   }
 
+  setProcessStack(config: ProcessStackConfig): void {
+    this.lypResult = null;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromProcessStack(config);
+    if (this.gdsDocument) {
+      void this.buildAndRenderModel();
+    }
+  }
+
+  setDerivedGeometry(config: DerivedGeometrySchema): void {
+    this.lypResult = null;
+    this.derivedSchema = config;
+    this.layerStack = this.createLayerStackFromDerivedGeometry(config);
+    if (this.gdsDocument) {
+      void this.buildAndRenderModel();
+    }
+  }
+
   async loadLypFile(file: File): Promise<void> {
-    const lypResult = await loadLypFromFileInWorker(file);
-    this.layerStack = lypToLayerStack(lypResult);
+    this.lypResult = await loadLypFromFileInWorker(file);
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromLyp(this.lypResult);
     if (this.gdsDocument) {
       await this.buildAndRenderModel();
     }
   }
 
   async loadLypFromUrl(url: string): Promise<void> {
-    const lypResult = await loadLypFromUrlInWorker(url);
-    this.layerStack = lypToLayerStack(lypResult);
+    this.lypResult = await loadLypFromUrlInWorker(url);
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromLyp(this.lypResult);
     if (this.gdsDocument) {
       await this.buildAndRenderModel();
     }
   }
 
   async loadLypFromString(xmlString: string): Promise<void> {
-    const lypResult = await parseLypFileInWorker(xmlString);
-    this.layerStack = lypToLayerStack(lypResult);
+    this.lypResult = await parseLypFileInWorker(xmlString);
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromLyp(this.lypResult);
+    if (this.gdsDocument) {
+      await this.buildAndRenderModel();
+    }
+  }
+
+  async loadDerivedGeometryFromUrl(url: string): Promise<void> {
+    const derived = await fetch(url).then((r) => r.json());
+    this.layerStack = this.createLayerStackFromDerivedGeometry(derived);
+    if (this.gdsDocument) {
+      await this.buildAndRenderModel();
+    }
+  }
+
+  async loadDerivedGeometryFromString(jsonString: string): Promise<void> {
+    const derived = JSON.parse(jsonString) as unknown;
+    this.layerStack = this.createLayerStackFromDerivedGeometry(derived);
+    if (this.gdsDocument) {
+      await this.buildAndRenderModel();
+    }
+  }
+
+  async loadProcessStackFromUrl(url: string): Promise<void> {
+    const processStack = await fetch(url).then((r) => r.json());
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromProcessStack(processStack);
+    if (this.gdsDocument) {
+      await this.buildAndRenderModel();
+    }
+  }
+
+  async loadProcessStackFromString(jsonString: string): Promise<void> {
+    const processStack = JSON.parse(jsonString) as unknown;
+    this.derivedSchema = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    this.layerStack = this.createLayerStackFromProcessStack(processStack);
     if (this.gdsDocument) {
       await this.buildAndRenderModel();
     }
@@ -1233,6 +1825,10 @@ export class GdsViewer extends HTMLElement {
   set2DMode(enabled: boolean): void {
     if (enabled === this.is2DMode) return;
     this.toggle2DMode();
+  }
+
+  setLypLayerOrdering(ordering: "lyp" | "lyp-reverse" | "classification"): void {
+    this.setAttribute("lyp-layer-ordering", ordering);
   }
 
   focusOn(

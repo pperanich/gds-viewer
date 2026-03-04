@@ -15,6 +15,12 @@ export {
   loadLypFromFile,
 } from "./lib/LypParser";
 export {
+  derivedGeometryToLayerStack,
+  isDerivedGeometrySchema,
+} from "./lib/DerivedGeometry";
+export { buildDerivedModel } from "./lib/DerivedGeometryModel";
+export { processStackToLayerStack } from "./lib/ProcessStack";
+export {
   loadLypFromUrlInWorker,
   loadLypFromFileInWorker,
   parseLypFileInWorker,
@@ -29,4 +35,15 @@ export type {
   BoundingBox,
   LayerStackConfig,
   LayerStackEntry,
+  ProcessStackConfig,
+  ProcessStackLayer,
+  DerivedGeometrySchema,
+  DerivedGeometryCadLayer,
+  DerivedGeometryMaterial,
+  DerivedGeometryParam,
+  DerivedGeometryMask,
+  DerivedGeometryMaskRef,
+  DerivedGeometryAlignmentRule,
+  DerivedGeometryProcessStep,
+  DerivedGeometryOutputs,
 } from "./types/gds";

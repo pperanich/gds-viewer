@@ -11,6 +11,7 @@ export interface LypLayerProperties {
   transparent: boolean;
   ditherPattern?: string;
   width?: number;
+  xfill?: boolean;
   valid: boolean;
 }
 
@@ -24,8 +25,31 @@ export interface SerializedLypParseResult {
   groups: [string, LypLayerProperties[]][];
 }
 
+interface LypVisualDefaults {
+  frameColor?: string;
+  fillColor?: string;
+  visible?: boolean;
+  transparent?: boolean;
+  ditherPattern?: string;
+  width?: number;
+  xfill?: boolean;
+  valid?: boolean;
+}
+
 const SOURCE_PATTERN = /^(\d+)\/(\d+)@/;
 const WILDCARD_SOURCE = "*/*@*";
+const DEFAULT_COLOR = "#808080";
+const OUTLINE_NAME_PATTERNS = [
+  /^WAFER$/i,
+  /^FRAME$/i,
+  /^PR_BNDRY/i,
+  /^BOUNDARY/i,
+  /boundary$/i,
+  /^BBOX/i,
+  /^DIEAREA/i,
+  /OUTLINE/i,
+  /^FLOORPLAN/i,
+];
 
 export function parseLypFile(xmlContent: string): LypParseResult {
   if (typeof DOMParser !== "undefined") {
@@ -36,7 +60,7 @@ export function parseLypFile(xmlContent: string): LypParseResult {
 }
 
 export function serializeLypParseResult(
-  result: LypParseResult
+  result: LypParseResult,
 ): SerializedLypParseResult {
   return {
     layers: result.layers,
@@ -45,7 +69,7 @@ export function serializeLypParseResult(
 }
 
 export function deserializeLypParseResult(
-  data: SerializedLypParseResult
+  data: SerializedLypParseResult,
 ): LypParseResult {
   return {
     layers: data.layers,
@@ -68,14 +92,15 @@ function parseLypWithDOMParser(xmlContent: string): LypParseResult {
   const propertiesElements = doc.querySelectorAll("layer-properties > properties");
 
   for (const props of propertiesElements) {
-    const groupMembers = props.querySelectorAll("group-members");
+    const defaults = parseVisualDefaultsDOM(props);
+    const groupMembers = props.querySelectorAll(":scope > group-members");
 
     if (groupMembers.length > 0) {
-      const groupName = getTextContentDOM(props, "name") || "Unnamed Group";
+      const groupName = getDirectTextContentDOM(props, "name") ?? "Unnamed Group";
       const memberLayers: LypLayerProperties[] = [];
 
       for (const member of groupMembers) {
-        const layer = parsePropertiesElementDOM(member);
+        const layer = parsePropertiesElementDOM(member, defaults);
         if (layer) {
           memberLayers.push(layer);
           layers.push(layer);
@@ -85,19 +110,23 @@ function parseLypWithDOMParser(xmlContent: string): LypParseResult {
       if (memberLayers.length > 0) {
         groups.set(groupName, memberLayers);
       }
-    } else {
-      const layer = parsePropertiesElementDOM(props);
-      if (layer) {
-        layers.push(layer);
-      }
+      continue;
+    }
+
+    const layer = parsePropertiesElementDOM(props, defaults);
+    if (layer) {
+      layers.push(layer);
     }
   }
 
   return { layers, groups };
 }
 
-function parsePropertiesElementDOM(element: Element): LypLayerProperties | null {
-  const source = getTextContentDOM(element, "source");
+function parsePropertiesElementDOM(
+  element: Element,
+  inherited: LypVisualDefaults = {},
+): LypLayerProperties | null {
+  const source = getDirectTextContentDOM(element, "source");
   if (!source || source === WILDCARD_SOURCE) {
     return null;
   }
@@ -110,15 +139,47 @@ function parsePropertiesElementDOM(element: Element): LypLayerProperties | null 
   const layer = parseInt(sourceMatch[1]!, 10);
   const datatype = parseInt(sourceMatch[2]!, 10);
 
-  const name = getTextContentDOM(element, "name") || `Layer ${layer}/${datatype}`;
-  const frameColor = normalizeColor(getTextContentDOM(element, "frame-color"));
-  const fillColor = normalizeColor(getTextContentDOM(element, "fill-color"));
-  const visible = getTextContentDOM(element, "visible") === "true";
-  const transparent = getTextContentDOM(element, "transparent") === "true";
-  const valid = getTextContentDOM(element, "valid") !== "false";
-  const ditherPattern = getTextContentDOM(element, "dither-pattern") || undefined;
-  const widthStr = getTextContentDOM(element, "width");
-  const width = widthStr ? parseInt(widthStr, 10) : undefined;
+  const name =
+    getDirectTextContentDOM(element, "name") ?? `Layer ${layer}/${datatype}`;
+
+  const frameColor = getColorWithFallbackDOM(
+    element,
+    "frame-color",
+    inherited.frameColor,
+  );
+  const fillColor = getColorWithFallbackDOM(
+    element,
+    "fill-color",
+    inherited.fillColor,
+  );
+  const visible = getBooleanWithFallbackDOM(
+    element,
+    "visible",
+    inherited.visible ?? true,
+  );
+  const transparent = getBooleanWithFallbackDOM(
+    element,
+    "transparent",
+    inherited.transparent ?? false,
+  );
+  const valid = getBooleanWithFallbackDOM(
+    element,
+    "valid",
+    inherited.valid ?? true,
+  );
+  const xfill = getBooleanWithFallbackDOM(
+    element,
+    "xfill",
+    inherited.xfill ?? false,
+  );
+
+  const ditherPattern = normalizeOptionalText(
+    getDirectTextContentDOM(element, "dither-pattern") ?? inherited.ditherPattern,
+  );
+  const width = parseOptionalInteger(
+    getDirectTextContentDOM(element, "width"),
+    inherited.width,
+  );
 
   return {
     name,
@@ -130,13 +191,89 @@ function parsePropertiesElementDOM(element: Element): LypLayerProperties | null 
     transparent,
     ditherPattern,
     width,
+    xfill,
     valid,
   };
 }
 
-function getTextContentDOM(parent: Element, tagName: string): string {
+function parseVisualDefaultsDOM(element: Element): LypVisualDefaults {
+  const defaults: LypVisualDefaults = {};
+
+  const frameColor = normalizeOptionalText(getDirectTextContentDOM(element, "frame-color"));
+  if (frameColor) {
+    defaults.frameColor = normalizeColor(frameColor);
+  }
+
+  const fillColor = normalizeOptionalText(getDirectTextContentDOM(element, "fill-color"));
+  if (fillColor) {
+    defaults.fillColor = normalizeColor(fillColor);
+  }
+
+  const visible = parseBooleanValue(getDirectTextContentDOM(element, "visible"));
+  if (visible !== undefined) {
+    defaults.visible = visible;
+  }
+
+  const transparent = parseBooleanValue(
+    getDirectTextContentDOM(element, "transparent"),
+  );
+  if (transparent !== undefined) {
+    defaults.transparent = transparent;
+  }
+
+  const valid = parseBooleanValue(getDirectTextContentDOM(element, "valid"));
+  if (valid !== undefined) {
+    defaults.valid = valid;
+  }
+
+  const xfill = parseBooleanValue(getDirectTextContentDOM(element, "xfill"));
+  if (xfill !== undefined) {
+    defaults.xfill = xfill;
+  }
+
+  const ditherPattern = normalizeOptionalText(
+    getDirectTextContentDOM(element, "dither-pattern"),
+  );
+  if (ditherPattern) {
+    defaults.ditherPattern = ditherPattern;
+  }
+
+  const width = parseOptionalInteger(getDirectTextContentDOM(element, "width"));
+  if (width !== undefined) {
+    defaults.width = width;
+  }
+
+  return defaults;
+}
+
+function getDirectTextContentDOM(
+  parent: Element,
+  tagName: string,
+): string | undefined {
   const element = parent.querySelector(`:scope > ${tagName}`);
-  return element?.textContent?.trim() ?? "";
+  if (!element) return undefined;
+  return element.textContent?.trim() ?? "";
+}
+
+function getColorWithFallbackDOM(
+  parent: Element,
+  tagName: string,
+  fallback?: string,
+): string {
+  const value = normalizeOptionalText(getDirectTextContentDOM(parent, tagName));
+  if (!value) {
+    return fallback ?? DEFAULT_COLOR;
+  }
+  return normalizeColor(value);
+}
+
+function getBooleanWithFallbackDOM(
+  parent: Element,
+  tagName: string,
+  fallback: boolean,
+): boolean {
+  const value = parseBooleanValue(getDirectTextContentDOM(parent, tagName));
+  return value ?? fallback;
 }
 
 function parseLypWithRegex(xmlContent: string): LypParseResult {
@@ -146,14 +283,15 @@ function parseLypWithRegex(xmlContent: string): LypParseResult {
   const propertiesBlocks = extractPropertiesBlocks(xmlContent);
 
   for (const block of propertiesBlocks) {
-    const groupMemberMatches = block.match(/<group-members>([\s\S]*?)<\/group-members>/g);
+    const groupMemberBlocks = block.match(/<group-members>([\s\S]*?)<\/group-members>/g);
+    const defaults = parseVisualDefaultsRegex(stripGroupMembers(block));
 
-    if (groupMemberMatches && groupMemberMatches.length > 0) {
-      const groupName = extractTagValue(block, "name") || "Unnamed Group";
+    if (groupMemberBlocks && groupMemberBlocks.length > 0) {
+      const groupName = extractTagValue(stripGroupMembers(block), "name") ?? "Unnamed Group";
       const memberLayers: LypLayerProperties[] = [];
 
-      for (const memberBlock of groupMemberMatches) {
-        const layer = parsePropertiesBlockRegex(memberBlock);
+      for (const memberBlock of groupMemberBlocks) {
+        const layer = parsePropertiesBlockRegex(memberBlock, defaults);
         if (layer) {
           memberLayers.push(layer);
           layers.push(layer);
@@ -163,11 +301,12 @@ function parseLypWithRegex(xmlContent: string): LypParseResult {
       if (memberLayers.length > 0) {
         groups.set(groupName, memberLayers);
       }
-    } else {
-      const layer = parsePropertiesBlockRegex(block);
-      if (layer) {
-        layers.push(layer);
-      }
+      continue;
+    }
+
+    const layer = parsePropertiesBlockRegex(block, defaults);
+    if (layer) {
+      layers.push(layer);
     }
   }
 
@@ -177,7 +316,7 @@ function parseLypWithRegex(xmlContent: string): LypParseResult {
 function extractPropertiesBlocks(xml: string): string[] {
   const blocks: string[] = [];
   const regex = /<properties>([\s\S]*?)<\/properties>/g;
-  let match;
+  let match: RegExpExecArray | null;
 
   while ((match = regex.exec(xml)) !== null) {
     blocks.push(match[0]);
@@ -186,7 +325,10 @@ function extractPropertiesBlocks(xml: string): string[] {
   return blocks;
 }
 
-function parsePropertiesBlockRegex(block: string): LypLayerProperties | null {
+function parsePropertiesBlockRegex(
+  block: string,
+  inherited: LypVisualDefaults = {},
+): LypLayerProperties | null {
   const source = extractTagValue(block, "source");
   if (!source || source === WILDCARD_SOURCE) {
     return null;
@@ -200,15 +342,39 @@ function parsePropertiesBlockRegex(block: string): LypLayerProperties | null {
   const layer = parseInt(sourceMatch[1]!, 10);
   const datatype = parseInt(sourceMatch[2]!, 10);
 
-  const name = extractTagValue(block, "name") || `Layer ${layer}/${datatype}`;
-  const frameColor = normalizeColor(extractTagValue(block, "frame-color"));
-  const fillColor = normalizeColor(extractTagValue(block, "fill-color"));
-  const visible = extractTagValue(block, "visible") === "true";
-  const transparent = extractTagValue(block, "transparent") === "true";
-  const valid = extractTagValue(block, "valid") !== "false";
-  const ditherPattern = extractTagValue(block, "dither-pattern") || undefined;
-  const widthStr = extractTagValue(block, "width");
-  const width = widthStr ? parseInt(widthStr, 10) : undefined;
+  const name = extractTagValue(block, "name") ?? `Layer ${layer}/${datatype}`;
+  const frameColor = getColorWithFallbackRegex(
+    extractTagValue(block, "frame-color"),
+    inherited.frameColor,
+  );
+  const fillColor = getColorWithFallbackRegex(
+    extractTagValue(block, "fill-color"),
+    inherited.fillColor,
+  );
+  const visible = getBooleanWithFallbackRegex(
+    extractTagValue(block, "visible"),
+    inherited.visible ?? true,
+  );
+  const transparent = getBooleanWithFallbackRegex(
+    extractTagValue(block, "transparent"),
+    inherited.transparent ?? false,
+  );
+  const valid = getBooleanWithFallbackRegex(
+    extractTagValue(block, "valid"),
+    inherited.valid ?? true,
+  );
+  const xfill = getBooleanWithFallbackRegex(
+    extractTagValue(block, "xfill"),
+    inherited.xfill ?? false,
+  );
+
+  const ditherPattern = normalizeOptionalText(
+    extractTagValue(block, "dither-pattern") ?? inherited.ditherPattern,
+  );
+  const width = parseOptionalInteger(
+    extractTagValue(block, "width"),
+    inherited.width,
+  );
 
   return {
     name,
@@ -220,31 +386,162 @@ function parsePropertiesBlockRegex(block: string): LypLayerProperties | null {
     transparent,
     ditherPattern,
     width,
+    xfill,
     valid,
   };
 }
 
-function extractTagValue(xml: string, tagName: string): string {
+function parseVisualDefaultsRegex(block: string): LypVisualDefaults {
+  const defaults: LypVisualDefaults = {};
+
+  const frameColor = normalizeOptionalText(extractTagValue(block, "frame-color"));
+  if (frameColor) {
+    defaults.frameColor = normalizeColor(frameColor);
+  }
+
+  const fillColor = normalizeOptionalText(extractTagValue(block, "fill-color"));
+  if (fillColor) {
+    defaults.fillColor = normalizeColor(fillColor);
+  }
+
+  const visible = parseBooleanValue(extractTagValue(block, "visible"));
+  if (visible !== undefined) {
+    defaults.visible = visible;
+  }
+
+  const transparent = parseBooleanValue(extractTagValue(block, "transparent"));
+  if (transparent !== undefined) {
+    defaults.transparent = transparent;
+  }
+
+  const valid = parseBooleanValue(extractTagValue(block, "valid"));
+  if (valid !== undefined) {
+    defaults.valid = valid;
+  }
+
+  const xfill = parseBooleanValue(extractTagValue(block, "xfill"));
+  if (xfill !== undefined) {
+    defaults.xfill = xfill;
+  }
+
+  const ditherPattern = normalizeOptionalText(extractTagValue(block, "dither-pattern"));
+  if (ditherPattern) {
+    defaults.ditherPattern = ditherPattern;
+  }
+
+  const width = parseOptionalInteger(extractTagValue(block, "width"));
+  if (width !== undefined) {
+    defaults.width = width;
+  }
+
+  return defaults;
+}
+
+function stripGroupMembers(xml: string): string {
+  return xml.replace(/<group-members>[\s\S]*?<\/group-members>/g, "");
+}
+
+function extractTagValue(xml: string, tagName: string): string | undefined {
   const regex = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "i");
   const match = xml.match(regex);
-  return match ? match[1]!.trim() : "";
+  return normalizeOptionalText(match?.[1]);
+}
+
+function getColorWithFallbackRegex(value?: string, fallback?: string): string {
+  if (!value) {
+    return fallback ?? DEFAULT_COLOR;
+  }
+  return normalizeColor(value);
+}
+
+function getBooleanWithFallbackRegex(value: string | undefined, fallback: boolean): boolean {
+  const parsed = parseBooleanValue(value);
+  return parsed ?? fallback;
+}
+
+function parseBooleanValue(value?: string): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized === "true" || normalized === "1") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "0") {
+    return false;
+  }
+  return undefined;
+}
+
+function normalizeOptionalText(value?: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function parseOptionalInteger(
+  value?: string,
+  fallback?: number,
+): number | undefined {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = parseInt(value, 10);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+
+  return parsed;
 }
 
 function normalizeColor(color: string): string {
-  if (!color) return "#808080";
+  const value = color.trim();
+  if (!value) return DEFAULT_COLOR;
 
-  if (color.startsWith("#") && color.length === 7) {
-    return color.toLowerCase();
+  if (value.startsWith("#") && value.length === 7) {
+    return value.toLowerCase();
   }
 
-  if (color.startsWith("#") && color.length === 4) {
-    const r = color[1];
-    const g = color[2];
-    const b = color[3];
+  if (value.startsWith("#") && value.length === 4) {
+    const r = value[1];
+    const g = value[2];
+    const b = value[3];
     return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
   }
 
-  return "#808080";
+  return DEFAULT_COLOR;
+}
+
+function shouldRenderAsOutline(
+  lyp: LypLayerProperties,
+  layerType: string,
+  baseName: string,
+): boolean {
+  if (layerType === "boundary") {
+    return true;
+  }
+
+  const normalized = baseName.trim();
+  for (const pattern of OUTLINE_NAME_PATTERNS) {
+    if (pattern.test(normalized)) {
+      return true;
+    }
+  }
+
+  const fullName = lyp.name.trim();
+  for (const pattern of OUTLINE_NAME_PATTERNS) {
+    if (pattern.test(fullName)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function lypToLayerStack(
@@ -253,24 +550,42 @@ export function lypToLayerStack(
     defaultThickness?: number;
     units?: "um" | "nm" | "mm";
     autoZOffset?: boolean;
-  } = {}
+    layerOrdering?: "lyp" | "lyp-reverse" | "classification";
+  } = {},
 ): LayerStackConfig {
-  const { defaultThickness = 0.2, units = "um", autoZOffset = true } = options;
+  const {
+    defaultThickness = 0.2,
+    units = "um",
+    autoZOffset = true,
+    layerOrdering = "lyp-reverse",
+  } = options;
 
-  const layersByZOrder = [...lypResult.layers]
+  const layersInOrder = lypResult.layers
     .filter((l) => l.valid)
     .map((l) => {
       const parsed = parseLayerName(l.name);
       const classification = classifyLayer(l.layer, l.datatype, parsed.baseName);
       return { lyp: l, classification, parsed };
-    })
-    .sort((a, b) => a.classification.zOrder - b.classification.zOrder);
+    });
+
+  if (layerOrdering === "classification") {
+    layersInOrder.sort((a, b) => a.classification.zOrder - b.classification.zOrder);
+  } else if (layerOrdering === "lyp-reverse") {
+    layersInOrder.reverse();
+  }
 
   let currentZOffset = 0;
   const layers: LayerStackEntry[] = [];
 
-  for (const { lyp, classification } of layersByZOrder) {
-    const color = lyp.fillColor || lyp.frameColor || getTypeColor(classification.type);
+  for (const { lyp, classification, parsed } of layersInOrder) {
+    const shouldOutline = shouldRenderAsOutline(
+      lyp,
+      classification.type,
+      parsed.baseName,
+    );
+    const color = shouldOutline
+      ? lyp.frameColor || lyp.fillColor || getTypeColor(classification.type)
+      : lyp.fillColor || lyp.frameColor || getTypeColor(classification.type);
     const thickness = getThicknessForType(classification.type, defaultThickness);
 
     layers.push({
@@ -280,9 +595,15 @@ export function lypToLayerStack(
       thickness,
       zOffset: autoZOffset ? currentZOffset : 0,
       color,
+      visible: shouldOutline ? false : lyp.visible,
       material: {
         opacity: lyp.transparent ? 0.5 : classification.defaultOpacity,
         metallic: classification.type === "metal" || classification.type === "heater",
+        lypTransparent: lyp.transparent,
+        lypOutline: shouldOutline,
+        lypDitherPattern: lyp.ditherPattern,
+        lypWidth: lyp.width,
+        lypXfill: lyp.xfill,
       },
     });
 
@@ -295,7 +616,7 @@ export function lypToLayerStack(
     layers,
     units,
     defaultThickness,
-    defaultColor: "#808080",
+    defaultColor: DEFAULT_COLOR,
   };
 }
 

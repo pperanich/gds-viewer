@@ -171,14 +171,20 @@
         <h1>GDS Viewer</h1>
         <div class="header-controls">
           <label class="upload-btn" style="background:#2f5b8a;">
-            Open GDS/LYP
+            Open GDS/LYP/JSON
             <input
               type="file"
               id="pair-input"
-              accept=".gds,.gdsii,.lyp"
+              accept=".gds,.gdsii,.lyp,.json"
               multiple
             />
           </label>
+          <button class="upload-btn" id="process-stack-btn" type="button" style="background:#2b7a4b;">
+            Use Sample Stack
+          </button>
+          <button class="upload-btn" id="derived-geometry-btn" type="button" style="background:#6b4b7a;">
+            Use Derived Geometry
+          </button>
         </div>
       </header>
       <div class="main-content">
@@ -211,6 +217,8 @@
       const fileList = document.getElementById("file-list");
       const loadingIndicator = document.getElementById("loading-indicator");
       const sidebar = document.querySelector(".sidebar");
+      const processStackBtn = document.getElementById("process-stack-btn");
+      const derivedGeometryBtn = document.getElementById("derived-geometry-btn");
 
       function hideSidebar() {
         sidebar.style.display = "none";
@@ -220,10 +228,36 @@
       const GITHUB_RAW_BASE = "/samples";
       const GDS_API_URL = "/samples/gds/index.json";
       const LYP_URL = `${GITHUB_RAW_BASE}/klayout/layers.lyp`;
+      const PROCESS_STACK_URL = "/examples/process-stack.sample.json";
+      const DERIVED_GEOMETRY_URL = "/examples/derived-geometry.sample.json";
 
       let gdsFiles = [];
       let currentFile = null;
       let lypLoaded = false;
+
+      async function loadDefaultProcessStack() {
+        loadingIndicator.classList.add("active");
+        try {
+          await viewer.loadProcessStackFromUrl(PROCESS_STACK_URL);
+        } catch (err) {
+          console.warn("Could not load process stack:", err);
+          alert("Failed to load Sample process stack JSON.");
+        } finally {
+          loadingIndicator.classList.remove("active");
+        }
+      }
+
+      async function loadDefaultDerivedGeometry() {
+        loadingIndicator.classList.add("active");
+        try {
+          await viewer.loadDerivedGeometryFromUrl(DERIVED_GEOMETRY_URL);
+        } catch (err) {
+          console.warn("Could not load derived geometry:", err);
+          alert("Failed to load derived-geometry JSON.");
+        } finally {
+          loadingIndicator.classList.remove("active");
+        }
+      }
 
       // Load LYP file once at startup
       async function loadDefaultLyp() {
@@ -318,12 +352,33 @@
         const lypFile = files.find((file) =>
           file.name.toLowerCase().endsWith(".lyp"),
         );
+        const jsonFile = files.find((file) =>
+          file.name.toLowerCase().endsWith(".json"),
+        );
 
-        if (!gdsFile && !lypFile) return;
+        if (!gdsFile && !lypFile && !jsonFile) return;
 
         if (gdsFile) {
           hideSidebar();
           currentFile = null;
+        }
+
+        async function loadJsonConfig(file) {
+          const text = await file.text();
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch (err) {
+            alert("Invalid JSON file.");
+            return;
+          }
+
+          if (parsed && typeof parsed === "object" && parsed.format === "gds-viewer-derived-geometry@1") {
+            await viewer.loadDerivedGeometryFromString(text);
+            return;
+          }
+
+          await viewer.loadProcessStackFromString(text);
         }
 
         loadingIndicator.classList.add("active");
@@ -331,16 +386,29 @@
           if (gdsFile && lypFile) {
             await viewer.loadGdsAndLypFiles(gdsFile, lypFile);
             lypLoaded = true;
+          } else if (gdsFile && jsonFile) {
+            await viewer.loadGdsFile(gdsFile);
+            await loadJsonConfig(jsonFile);
           } else if (gdsFile) {
             await viewer.loadGdsFile(gdsFile);
           } else if (lypFile) {
             await viewer.loadLypFile(lypFile);
             lypLoaded = true;
+          } else if (jsonFile) {
+            await loadJsonConfig(jsonFile);
           }
         } finally {
           loadingIndicator.classList.remove("active");
           pairInput.value = "";
         }
+      });
+
+      processStackBtn.addEventListener("click", () => {
+        void loadDefaultProcessStack();
+      });
+
+      derivedGeometryBtn.addEventListener("click", () => {
+        void loadDefaultDerivedGeometry();
       });
 
       container.addEventListener("dragover", (e) => {

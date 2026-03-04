@@ -9,7 +9,7 @@ A high-performance 3D GDS/GDSII file viewer built as a Web Component. Visualize 
 - **3D & 2D Visualization** - Interactive 3D rendering with orthographic 2D mode
 - **Measurement Tools** - Precise distance measurements in 2D mode
 - **Layer Management** - Toggle visibility, group by type, automatic layer classification
-- **Layer Stack Support** - Import KLayout `.lyp` files or use custom layer configurations
+- **Layer Stack Support** - Import KLayout `.lyp`, custom layer stacks, process-stack JSON, or derived-geometry JSON
 - **Web Worker Parsing** - Non-blocking GDS file parsing for smooth UI
 - **Smart Defaults** - Automatic layer classification for photonics and semiconductor designs
 - **Scale & Grid** - Dynamic scale ruler and grid overlay
@@ -102,6 +102,12 @@ viewer.setLayerStack({
   defaultThickness: 0.2,
 });
 
+// Or load a physical process-stack JSON (example in examples/process-stack.sample.json)
+await viewer.loadProcessStackFromUrl("/process-stack.sample.json");
+
+// Or load a derived-geometry JSON (example in examples/derived-geometry.sample.json)
+await viewer.loadDerivedGeometryFromUrl("/derived-geometry.sample.json");
+
 // Access parsed document
 const doc = viewer.getDocument();
 console.log(doc.cells, doc.layers, doc.boundingBox);
@@ -115,7 +121,12 @@ console.log(doc.cells, doc.layers, doc.boundingBox);
 | ----------------- | ------------------------------------------- |
 | `gds-url`         | URL to GDS/GDSII file                       |
 | `lyp-url`         | URL to KLayout layer properties file (.lyp) |
+| `derived-geometry-url` | URL to derived-geometry JSON configuration |
+| `derived-geometry-overlay-mode` | Overlay envelope mode for aligned masks (`nominal`, `typical`, `max`; default: `typical`) |
+| `process-stack-url` | URL to process-stack JSON configuration    |
 | `layer-stack-url` | URL to JSON layer stack configuration       |
+| `theme`           | Initial theme (`light` or `dark`)           |
+| `lyp-layer-ordering` | LYP draw order (`lyp`, `lyp-reverse`, `classification`) |
 
 ### Methods
 
@@ -142,6 +153,19 @@ await viewer.loadLypFromString(xmlString: string)
 
 // Set custom layer stack
 viewer.setLayerStack(config: LayerStackConfig)
+
+// Load physical process stack JSON
+await viewer.loadProcessStackFromUrl(url: string)
+await viewer.loadProcessStackFromString(jsonString: string)
+viewer.setProcessStack(config: ProcessStackConfig)
+
+// Load derived-geometry JSON
+await viewer.loadDerivedGeometryFromUrl(url: string)
+await viewer.loadDerivedGeometryFromString(jsonString: string)
+viewer.setDerivedGeometry(config: DerivedGeometrySchema)
+
+// Control LYP-derived ordering (if a .lyp is loaded)
+viewer.setLypLayerOrdering("lyp" | "lyp-reverse" | "classification")
 ```
 
 #### Data Access
@@ -166,6 +190,8 @@ import type {
   BoundingBox,
   LayerStackConfig,
   LayerStackEntry,
+  ProcessStackConfig,
+  ProcessStackLayer,
   LayerType,
   LayerClassification,
 } from "gds-viewer";
@@ -177,13 +203,18 @@ import type {
 interface LayerStackConfig {
   layers: LayerStackEntry[];
   units?: string; // "nm" | "um" | "mm"
-  defaultThickness: number;
+  defaultThickness?: number;
+  defaultColor?: string;
 }
 
 interface LayerStackEntry {
+  id?: string;
   layer: number;
   datatype: number;
-  name: string;
+  name?: string;
+  visible?: boolean;
+  group?: string;
+  source?: { layer: number; datatype: number };
   thickness: number;
   zOffset: number;
   color: string; // hex color
@@ -193,6 +224,47 @@ interface LayerStackEntry {
   };
 }
 ```
+
+### Process Stack Configuration
+
+`ProcessStackConfig` captures physical `zMin` and `thickness` per layer and is converted to `LayerStackConfig` internally.
+
+```typescript
+interface ProcessStackConfig {
+  format?: "gds-viewer-process-stack@1";
+  units?: "um" | "nm" | "mm";
+  defaultThickness?: number;
+  defaultColor?: string;
+  layers: ProcessStackLayer[];
+}
+
+interface ProcessStackLayer {
+  id?: string;
+  layer: number;
+  datatype: number;
+  name: string;
+  zMin: number;
+  thickness: number;
+  color?: string;
+  visible?: boolean;
+  material?: {
+    opacity?: number;
+    metallic?: boolean;
+  };
+}
+```
+
+### Derived Geometry Configuration
+
+`DerivedGeometrySchema` describes a process-style stack (base slabs + deposit/etch steps) and compiles to renderable `LayerStackConfig` entries. Example: `examples/derived-geometry.sample.json`.
+
+Note: derived-geometry currently supports **base slabs**, **deposit steps** (including multiple stacked films on the same CAD layer), and **etch steps** on both die-area and mask-patterned solids using polygon boolean operations (union/intersection/difference). `mask.alignment` can be visualized as an **overlay envelope** using `derived-geometry-overlay-mode` (implemented via polygon offsetting). Masks can also be composed via `schema.masks` and `and/or/not/ref` expressions in step masks.
+
+Precedence when URL attributes are provided:
+1. `lyp-url`
+2. `derived-geometry-url`
+3. `process-stack-url`
+4. `layer-stack-url`
 
 ## Styling
 
@@ -227,6 +299,10 @@ gds-viewer {
   --gds-grid-color-light: #aaaaaa;
   --gds-grid-color-dark: #888888;
   --gds-grid-opacity: 0.4;
+
+  /* Layer compositing tuning (applies in both 2D and 3D) */
+  --gds-2d-opacity-scale: 0.72;
+  --gds-2d-opacity-min: 0.16;
 
   /* Measurement tool styling */
   --gds-measure-color: #ff6600;

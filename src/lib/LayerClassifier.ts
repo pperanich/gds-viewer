@@ -367,7 +367,7 @@ export function classifyLayer(
     return {
       type: "boundary",
       isAnnotation: true,
-      defaultVisible: true,
+      defaultVisible: false,
       defaultOpacity: 0.3,
       zOrder: -100,
     };
