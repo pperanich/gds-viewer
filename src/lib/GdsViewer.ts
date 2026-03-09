@@ -7,17 +7,26 @@ import type {
   LayerStackEntry,
   ProcessStackConfig,
   DerivedGeometrySchema,
-  TextElement,
 } from "../types/gds";
-import { parseGDSII } from "./GDSParser";
-import { buildGeometryAsync, buildLayerMap, getUnitScale } from "./GeometryBuilder";
+import {
+  createDocumentMetadata,
+  parseAndBuildGDS,
+  parseGDSII,
+  type GDSBuildArtifact,
+  type GDSDocumentMetadata,
+  type LoadProgressCallback,
+} from "./GDSParser";
+import { buildGeometryFromPayload, buildLayerMap, type GeometryLayerPayload } from "./GeometryBuilder";
+import { getUnitScale } from "./GeometryCommon";
+import type {
+  GeometryComplexityStats,
+  GeometryRenderEntryInfo,
+  GeometryRenderMode,
+} from "./GeometryPayloadBuilder";
 import { classifyLayer, getTypeColor } from "./LayerClassifier";
 import { lypToLayerStack, type LypParseResult } from "./LypParser";
-import {
-  derivedGeometryToLayerStack,
-  isDerivedGeometrySchema,
-} from "./DerivedGeometry";
-import { buildDerivedModel } from "./DerivedGeometryModel";
+import { isDerivedGeometrySchema } from "./DerivedGeometry";
+import { buildDerivedModelAsync } from "./DerivedGeometryModel";
 import { processStackToLayerStack } from "./ProcessStack";
 import {
   loadLypFromUrlInWorker,
@@ -43,6 +52,8 @@ export class GdsViewer extends HTMLElement {
   private chipBackdropMaterial: THREE.MeshBasicMaterial;
 
   private gdsDocument: GDSDocument | null = null;
+  private gdsMetadata: GDSDocumentMetadata | null = null;
+  private gdsSourceBuffer: ArrayBuffer | null = null;
   private layerStack: LayerStackConfig | null = null;
   private lypResult: LypParseResult | null = null;
   private derivedSchema: DerivedGeometrySchema | null = null;
@@ -50,6 +61,15 @@ export class GdsViewer extends HTMLElement {
   private derivedWarnings: string[] = [];
   private layerVisibility: Map<string, boolean> = new Map();
   private textLayerGroups: Map<string, TextLayerGroup> = new Map();
+  private standardRenderEntries: GeometryRenderEntryInfo[] = [];
+  private buildableRenderKeys: Set<string> = new Set();
+  private deferredRenderKeys: Set<string> = new Set();
+  private standardTextLayerKeys: Set<string> = new Set();
+  private standardGeometryCache = new Map<
+    GeometryRenderMode,
+    Map<string, GeometryLayerPayload>
+  >();
+  private pendingStandardLayerBuilds: Set<string> = new Set();
 
   private scaleRuler: ScaleRuler;
   private gridOverlay: GridOverlay;
@@ -75,6 +95,14 @@ export class GdsViewer extends HTMLElement {
   private is2DMode: boolean = false;
   private rendererReady: boolean = false;
   private buildToken: number = 0;
+  private pendingDisposeTimer: number | null = null;
+  private resourcesDisposed: boolean = false;
+  private loadPhase: string | null = null;
+  private loadProgress: number = 0;
+  private loadStatusMessage: string = "";
+  private lastGeometryStats: GeometryComplexityStats | null = null;
+  private preferredFlatMode: boolean = false;
+  private flatGeometryActive: boolean = false;
 
   static get observedAttributes() {
     return [
@@ -241,6 +269,11 @@ export class GdsViewer extends HTMLElement {
   }
 
   connectedCallback() {
+    console.log("[gds-viewer] connected");
+    if (this.pendingDisposeTimer !== null) {
+      window.clearTimeout(this.pendingDisposeTimer);
+      this.pendingDisposeTimer = null;
+    }
     this.resizeObserver.observe(this.container);
     this.handleResize();
     this.setTheme(this.getThemeFromAttribute(), false);
@@ -253,6 +286,17 @@ export class GdsViewer extends HTMLElement {
   disconnectedCallback() {
     this.resizeObserver.disconnect();
     this.renderer.setAnimationLoop(null);
+    this.pendingDisposeTimer = window.setTimeout(() => {
+      this.pendingDisposeTimer = null;
+      if (this.isConnected || this.resourcesDisposed) return;
+      this.disposeResources();
+    }, 0);
+  }
+
+  private disposeResources() {
+    this.resourcesDisposed = true;
+    this.buildToken += 1;
+    this.rendererReady = false;
     this.renderer.dispose();
     this.controls.dispose();
     this.gridOverlay.dispose();
@@ -291,9 +335,9 @@ export class GdsViewer extends HTMLElement {
     }
   }
 
-	  private async loadFromAttributes() {
-	    const gdsUrl = this.getAttribute("gds-url");
-	    const derivedGeometryUrl = this.getAttribute("derived-geometry-url");
+  private async loadFromAttributes() {
+    const gdsUrl = this.getAttribute("gds-url");
+    const derivedGeometryUrl = this.getAttribute("derived-geometry-url");
 	    const processStackUrl = this.getAttribute("process-stack-url");
 	    const layerStackUrl = this.getAttribute("layer-stack-url");
 	    const lypUrl = this.getAttribute("lyp-url");
@@ -301,100 +345,315 @@ export class GdsViewer extends HTMLElement {
     if (!gdsUrl) return;
 
     try {
-      const gdsPromise = fetch(gdsUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buffer) => parseGDSII(buffer));
+      const gdsBufferPromise = fetch(gdsUrl).then((r) => r.arrayBuffer());
 
-	      const layerStackPromise = lypUrl
-	        ? loadLypFromUrlInWorker(lypUrl).then((lypResult) => {
-	            this.lypResult = lypResult;
-	            this.derivedSchema = null;
-	            this.derivedUiGroups = null;
-	            this.derivedWarnings = [];
-	            return this.createLayerStackFromLyp(lypResult);
-	          })
-	        : derivedGeometryUrl
-	          ? fetch(derivedGeometryUrl)
-	              .then((r) => r.json())
-	              .then((json) => this.createLayerStackFromDerivedGeometry(json))
-	        : processStackUrl
-	          ? fetch(processStackUrl)
-	              .then((r) => r.json())
-	              .then((json) => this.createLayerStackFromProcessStack(json))
-	        : layerStackUrl
-	          ? fetch(layerStackUrl).then((r) => {
-	              this.lypResult = null;
-	              this.derivedSchema = null;
-	              this.derivedUiGroups = null;
-	              this.derivedWarnings = [];
-	              return r.json();
-	            })
-	          : Promise.resolve<LayerStackConfig | null>(null);
+      if (derivedGeometryUrl) {
+        const [buffer, derived] = await Promise.all([
+          gdsBufferPromise,
+          fetch(derivedGeometryUrl).then((r) => r.json()),
+        ]);
+        this.gdsSourceBuffer = buffer.slice(0);
+        this.gdsDocument = await parseGDSII(buffer);
+        this.gdsMetadata = createDocumentMetadata(this.gdsDocument);
+        this.layerStack = this.createLayerStackFromDerivedGeometry(derived);
+        await this.buildAndRenderModel();
+        return;
+      }
 
-      const [gdsDocument, layerStack] = await Promise.all([
-        gdsPromise,
+      const layerStackPromise = lypUrl
+        ? loadLypFromUrlInWorker(lypUrl).then((lypResult) => {
+            this.lypResult = lypResult;
+            this.derivedSchema = null;
+            this.derivedUiGroups = null;
+            this.derivedWarnings = [];
+            return this.createLayerStackFromLyp(lypResult);
+          })
+        : processStackUrl
+          ? fetch(processStackUrl)
+              .then((r) => r.json())
+              .then((json) => this.createLayerStackFromProcessStack(json))
+          : layerStackUrl
+            ? fetch(layerStackUrl).then((r) => {
+                this.lypResult = null;
+                this.derivedSchema = null;
+                this.derivedUiGroups = null;
+                this.derivedWarnings = [];
+                return r.json();
+              })
+            : Promise.resolve<LayerStackConfig | null>(null);
+
+      const [buffer, layerStack] = await Promise.all([
+        gdsBufferPromise,
         layerStackPromise,
       ]);
 
-	      this.gdsDocument = gdsDocument;
-	      this.layerStack = layerStack ?? this.createDefaultLayerStack();
-	      if (!lypUrl && !derivedGeometryUrl && !processStackUrl && !layerStackUrl) {
-	        this.lypResult = null;
-	        this.derivedSchema = null;
-	        this.derivedUiGroups = null;
-	        this.derivedWarnings = [];
-	      }
+      if (!lypUrl && !processStackUrl && !layerStackUrl) {
+        this.lypResult = null;
+        this.derivedSchema = null;
+        this.derivedUiGroups = null;
+        this.derivedWarnings = [];
+      }
 
-      await this.buildAndRenderModel();
+      await this.loadStandardGdsBuild(buffer, layerStack);
     } catch (error) {
       console.error("Failed to load GDS:", error);
+      this.updateLoadState(null, 0, "");
     }
   }
 
-  private createDefaultLayerStack(): LayerStackConfig {
-    if (!this.gdsDocument) {
-      return { layers: [], defaultThickness: 0.2 };
-    }
+  private updateLoadState(
+    phase: string | null,
+    progress: number = 0,
+    message: string = "",
+  ) {
+    this.loadPhase = phase;
+    this.loadProgress = progress;
+    this.loadStatusMessage = message;
+    this.updateControlsPanel();
+  }
 
-    const layerEntries = Array.from(this.gdsDocument.layers.values()).map(
-      (layer) => {
-        const classification = classifyLayer(
-          layer.layer,
-          layer.datatype,
-          layer.name,
-        );
-        return { layer, classification };
-      },
+  private getLoadProgressCallback(): LoadProgressCallback {
+    return (progress, message, phase) => {
+      this.updateLoadState(phase ?? "loading", progress, message);
+    };
+  }
+
+  private getDocumentMetadata(): GDSDocumentMetadata | null {
+    if (this.gdsMetadata) return this.gdsMetadata;
+    if (!this.gdsDocument) return null;
+    return createDocumentMetadata(this.gdsDocument);
+  }
+
+  private hasLoadedGdsData(): boolean {
+    return this.gdsDocument !== null || this.gdsMetadata !== null;
+  }
+
+  private clearStandardGeometryState() {
+    this.gdsMetadata = null;
+    this.gdsSourceBuffer = null;
+    this.standardRenderEntries = [];
+    this.buildableRenderKeys.clear();
+    this.deferredRenderKeys.clear();
+    this.standardTextLayerKeys.clear();
+    this.standardGeometryCache.clear();
+    this.pendingStandardLayerBuilds.clear();
+  }
+
+  private resetStandardGeometryCaches() {
+    this.gdsDocument = null;
+    this.standardGeometryCache.clear();
+    this.pendingStandardLayerBuilds.clear();
+    this.deferredRenderKeys = new Set(
+      this.standardRenderEntries
+        .map((entry) => entry.renderKey)
+        .filter((key) => this.buildableRenderKeys.has(key)),
     );
+  }
 
-    const layers: LayerStackConfig["layers"] = [];
-    let zOffset = 0;
-    const defaultThickness = 0.2;
+  private getActiveStandardRenderMode(): GeometryRenderMode {
+    return this.flatGeometryActive ? "flat" : "extruded";
+  }
 
-    for (const { layer, classification } of layerEntries) {
-      const thickness = this.getThicknessForType(
-        classification.type,
-        defaultThickness,
-      );
-      const color = layer.color || getTypeColor(classification.type);
+  private cacheStandardPayloads(mode: GeometryRenderMode, layers: GeometryLayerPayload[]) {
+    let cache = this.standardGeometryCache.get(mode);
+    if (!cache) {
+      cache = new Map();
+      this.standardGeometryCache.set(mode, cache);
+    }
+    for (const layer of layers) {
+      cache.set(layer.layerKey, layer);
+      this.deferredRenderKeys.delete(layer.layerKey);
+    }
+  }
 
-      layers.push({
-        layer: layer.layer,
-        datatype: layer.datatype,
-        name: layer.name,
-        thickness,
-        zOffset,
-        color,
-        material: {
-          opacity: classification.defaultOpacity,
-          metallic:
-            classification.type === "metal" || classification.type === "heater",
-        },
-      });
-      zOffset += thickness * 1.1;
+  private collectCachedLayers(mode: GeometryRenderMode, renderKeys: string[]): GeometryLayerPayload[] | null {
+    const cache = this.standardGeometryCache.get(mode);
+    if (!cache) return null;
+    const layers: GeometryLayerPayload[] = [];
+    for (const key of renderKeys) {
+      const layer = cache.get(key);
+      if (!layer) return null;
+      layers.push(layer);
+    }
+    return layers.sort((a, b) => a.renderOrder - b.renderOrder);
+  }
+
+  private getVisibleRenderKeys(): string[] {
+    return this.standardRenderEntries
+      .filter((entry) => this.buildableRenderKeys.has(entry.renderKey))
+      .filter(
+        (entry) =>
+          this.layerVisibility.get(entry.renderKey) ?? entry.defaultVisible,
+      )
+      .map((entry) => entry.renderKey);
+  }
+
+  private applyStandardArtifact(artifact: GDSBuildArtifact) {
+    this.gdsMetadata = artifact.metadata;
+    this.layerStack = artifact.layerStack;
+    this.lastGeometryStats = artifact.stats;
+    this.preferredFlatMode = artifact.stats.chosenMode === "flat";
+    this.standardRenderEntries = artifact.renderEntries;
+    this.buildableRenderKeys = new Set(artifact.buildableRenderKeys);
+    this.deferredRenderKeys = new Set(artifact.deferredRenderKeys);
+    this.standardTextLayerKeys = new Set(
+      artifact.metadata.texts.map((text) => `${text.layer}:${text.texttype}`),
+    );
+  }
+
+  private async ensureFullDocument(): Promise<GDSDocument | null> {
+    if (this.gdsDocument) return this.gdsDocument;
+    if (!this.gdsSourceBuffer) return null;
+    this.updateLoadState("parsing-gds", 0, "Loading full polygon document...");
+    const document = await parseGDSII(this.gdsSourceBuffer.slice(0));
+    this.gdsDocument = document;
+    this.gdsMetadata = createDocumentMetadata(document);
+    this.updateLoadState(null, 0, "");
+    return document;
+  }
+
+  private async buildStandardLayers(
+    mode: GeometryRenderMode | "auto",
+    options: {
+      includeRenderKeys?: string[];
+      deferHiddenLayers?: boolean;
+    } = {},
+  ): Promise<GDSBuildArtifact> {
+    if (!this.gdsSourceBuffer) {
+      throw new Error("No GDS source buffer available for rebuild");
     }
 
-    return { layers, units: "um", defaultThickness: 0.2 };
+    const artifact = await parseAndBuildGDS(
+      this.gdsSourceBuffer.slice(0),
+      this.layerStack,
+      {
+        zScale: this.baseZScale,
+        mode,
+        includeRenderKeys: options.includeRenderKeys,
+        deferHiddenLayers: options.deferHiddenLayers,
+      },
+      this.getLoadProgressCallback(),
+    );
+    return artifact;
+  }
+
+  private async ensureStandardLayerBuilt(layerKey: string) {
+    if (
+      this.derivedSchema ||
+      !this.gdsSourceBuffer ||
+      !this.layerStack ||
+      !this.buildableRenderKeys.has(layerKey) ||
+      this.pendingStandardLayerBuilds.has(layerKey)
+    ) {
+      return;
+    }
+
+    const mode = this.getActiveStandardRenderMode();
+    const cache = this.standardGeometryCache.get(mode);
+    if (cache?.has(layerKey)) {
+      return;
+    }
+
+    this.pendingStandardLayerBuilds.add(layerKey);
+    const token = this.buildToken;
+    try {
+      const artifact = await this.buildStandardLayers(mode, {
+        includeRenderKeys: [layerKey],
+      });
+      if (token !== this.buildToken) return;
+      this.cacheStandardPayloads(mode, artifact.layers);
+      const builtLayer = artifact.layers.find((layer) => layer.layerKey === layerKey);
+      if (builtLayer && this.modelGroup) {
+        const group = buildGeometryFromPayload([builtLayer]);
+        for (const child of [...group.children]) {
+          group.remove(child);
+          child.visible = this.layerVisibility.get(layerKey) ?? true;
+          this.modelGroup.add(child);
+        }
+        this.disposeGroup(group);
+      }
+    } finally {
+      this.pendingStandardLayerBuilds.delete(layerKey);
+      this.updateControlsPanel();
+    }
+  }
+
+  private async commitBuiltModel(
+    nextModel: THREE.Group,
+    token: number,
+    nextLayerStack: LayerStackConfig | null = null,
+  ) {
+    if (token !== this.buildToken) {
+      this.disposeGroup(nextModel);
+      return;
+    }
+
+    if (nextLayerStack) {
+      this.layerStack = nextLayerStack;
+    }
+
+    if (this.modelGroup) {
+      this.scene.remove(this.modelGroup);
+      this.disposeGroup(this.modelGroup);
+    }
+
+    if (this.textGroup) {
+      this.scene.remove(this.textGroup);
+      this.disposeGroup(this.textGroup);
+    }
+
+    this.modelGroup = nextModel;
+    this.modelGroup.scale.z = this.zScale;
+    this.scene.add(this.modelGroup);
+    this.updateChipBackdropBounds();
+
+    if (this.is2DMode) {
+      this.modelGroup.scale.z = 0.001;
+      this.apply2DCompositing();
+    } else {
+      this.apply2DCompositing();
+    }
+
+    this.fitCameraToModel();
+    await this.renderTexts(token);
+    this.initLayerVisibility();
+    this.updateLayerPanel();
+  }
+
+  private async loadStandardGdsBuild(
+    buffer: ArrayBuffer,
+    layerStack: LayerStackConfig | null,
+  ) {
+    const token = ++this.buildToken;
+    this.clearStandardGeometryState();
+    this.gdsDocument = null;
+    this.gdsSourceBuffer = buffer.slice(0);
+    this.layerStack = layerStack;
+    this.updateLoadState("parsing-gds", 0, "Preparing GDS load...");
+
+    const artifact = await this.buildStandardLayers("auto", {
+      deferHiddenLayers: true,
+    });
+
+    if (token !== this.buildToken) return;
+
+    this.standardGeometryCache.clear();
+    this.applyStandardArtifact(artifact);
+    this.cacheStandardPayloads(artifact.stats.chosenMode, artifact.layers);
+    this.flatGeometryActive =
+      artifact.stats.chosenMode === "flat" || artifact.stats.exceedsHardLimit;
+    const shouldAuto2D = this.preferredFlatMode && !this.is2DMode;
+
+    this.updateLoadState("uploading-to-gpu", 96, "Uploading geometry to GPU...");
+    const nextModel = buildGeometryFromPayload(
+      artifact.layers.sort((a, b) => a.renderOrder - b.renderOrder),
+    );
+    await this.commitBuiltModel(nextModel, token);
+    if (shouldAuto2D) {
+      this.toggle2DMode();
+    }
+    this.updateLoadState("ready", 100, "Ready");
+    this.updateLoadState(null, 0, "");
   }
 
   private getLypLayerOrderingFromAttribute():
@@ -428,27 +687,25 @@ export class GdsViewer extends HTMLElement {
 	    });
 	  }
 
-	  private createLayerStackFromDerivedGeometry(
-	    derivedGeometry: unknown,
-	  ): LayerStackConfig {
+  private createLayerStackFromDerivedGeometry(
+    derivedGeometry: unknown,
+  ): LayerStackConfig {
 	    if (!isDerivedGeometrySchema(derivedGeometry)) {
-	      throw new Error(
-	        'Invalid derived-geometry JSON: expected format "gds-viewer-derived-geometry@1"',
-	      );
-	    }
-	    this.derivedSchema = derivedGeometry;
-	    const result = derivedGeometryToLayerStack(derivedGeometry);
-	    this.lypResult = null;
-	    this.derivedUiGroups = result.uiGroups;
-	    this.derivedWarnings = result.warnings;
-	    if (result.warnings.length > 0) {
-	      console.warn(
-	        "Derived geometry conversion warnings:",
-	        result.warnings,
-	      );
-	    }
-	    return result.layerStack;
-	  }
+      throw new Error(
+        'Invalid derived-geometry JSON: expected format "gds-viewer-derived-geometry@1"',
+      );
+    }
+    this.derivedSchema = derivedGeometry;
+    this.lypResult = null;
+    this.derivedUiGroups = null;
+    this.derivedWarnings = [];
+    return {
+      layers: [],
+      units: derivedGeometry.units?.z ?? "um",
+      defaultThickness: 0.2,
+      defaultColor: "#c0c0c0",
+    };
+  }
 
 	  private createLayerStackFromProcessStack(
 	    processStack: unknown,
@@ -531,130 +788,74 @@ export class GdsViewer extends HTMLElement {
   private async handleLypLayerOrderingChanged() {
     if (!this.lypResult) return;
     this.layerStack = this.createLayerStackFromLyp(this.lypResult);
-    if (this.gdsDocument) {
+    if (this.hasLoadedGdsData()) {
+      this.resetStandardGeometryCaches();
       await this.buildAndRenderModel();
     }
   }
 
-  private getThicknessForType(type: string, defaultThickness: number): number {
-    switch (type) {
-      case "well":
-        return defaultThickness * 2;
-      case "active":
-      case "poly":
-        return defaultThickness * 0.8;
-      case "metal":
-        return defaultThickness * 1.5;
-      case "via":
-      case "contact":
-        return defaultThickness * 1.2;
-      case "heater":
-        return defaultThickness * 0.6;
-      case "waveguide":
-        return defaultThickness * 1.0;
-      case "slab":
-        return defaultThickness * 0.5;
-      case "doping":
-        return defaultThickness * 0.3;
-      case "cladding":
-        return defaultThickness * 3;
-      default:
-        return defaultThickness;
-    }
-  }
-
-	  private async buildAndRenderModel() {
-	    if (!this.gdsDocument || !this.layerStack) return;
+  private async buildAndRenderModel() {
+    if (!this.hasLoadedGdsData() || (!this.layerStack && !this.derivedSchema)) return;
 
 	    const token = ++this.buildToken;
 
 	    let nextModel: THREE.Group;
 	    let nextLayerStack: LayerStackConfig | null = null;
 
-	    if (this.derivedSchema) {
-	      const result = buildDerivedModel(this.gdsDocument, this.derivedSchema, {
-	        zScale: this.baseZScale,
-          overlayMode: this.getDerivedGeometryOverlayModeFromAttribute(),
-	      });
-	      nextModel = result.group;
-	      nextLayerStack = result.layerStack;
+    if (this.derivedSchema) {
+      const document = await this.ensureFullDocument();
+      if (!document) return;
+      const result = await buildDerivedModelAsync(document, this.derivedSchema, {
+        zScale: this.baseZScale,
+        overlayMode: this.getDerivedGeometryOverlayModeFromAttribute(),
+      });
+      nextModel = result.group;
+      nextLayerStack = result.layerStack;
 	      this.derivedUiGroups = result.uiGroups;
 	      this.derivedWarnings = result.warnings;
 	      if (result.warnings.length > 0) {
 	        console.warn("Derived geometry warnings:", result.warnings);
 	      }
-	    } else {
-	      nextModel = await buildGeometryAsync(
-	        this.gdsDocument,
-	        this.layerStack,
-	        {
-	          zScale: this.baseZScale,
-	        },
-	      );
-	    }
-
-	    if (token !== this.buildToken) {
-	      this.disposeGroup(nextModel);
-	      return;
-	    }
-
-	    if (nextLayerStack) {
-	      this.layerStack = nextLayerStack;
-	    }
-
-	    if (this.modelGroup) {
-	      this.scene.remove(this.modelGroup);
-	      this.disposeGroup(this.modelGroup);
-	    }
-
-    if (this.textGroup) {
-      this.scene.remove(this.textGroup);
-      this.disposeGroup(this.textGroup);
-    }
-
-    this.modelGroup = nextModel;
-    this.modelGroup.scale.z = this.zScale;
-    this.scene.add(this.modelGroup);
-    this.updateChipBackdropBounds();
-
-    if (this.is2DMode) {
-      this.modelGroup.scale.z = 0.001;
-      this.apply2DCompositing();
     } else {
-      this.apply2DCompositing();
-    }
+      const layerStack = this.layerStack;
+      if (!layerStack) return;
+      const mode = this.getActiveStandardRenderMode();
+      const visibleRenderKeys = this.getVisibleRenderKeys();
+      const cachedLayers = this.collectCachedLayers(mode, visibleRenderKeys);
+      let layers = cachedLayers;
+      if (!layers) {
+        const artifact = await this.buildStandardLayers(mode, {
+          includeRenderKeys: visibleRenderKeys,
+        });
+        if (token !== this.buildToken) return;
+        this.standardGeometryCache.clear();
+        this.applyStandardArtifact(artifact);
+        this.cacheStandardPayloads(artifact.stats.chosenMode, artifact.layers);
+        layers = artifact.layers.sort((a, b) => a.renderOrder - b.renderOrder);
+      }
+      nextModel = buildGeometryFromPayload(layers);
+	    }
 
-    this.fitCameraToModel();
-
-    await this.renderTexts(token);
-
-    this.initLayerVisibility();
-    this.updateLayerPanel();
+    await this.commitBuiltModel(nextModel, token, nextLayerStack);
   }
 
   private async renderTexts(buildToken?: number) {
-    if (!this.gdsDocument || !this.layerStack) return;
-
-    const allTexts: TextElement[] = [];
-    for (const cell of this.gdsDocument.cells.values()) {
-      allTexts.push(...cell.texts);
-    }
-
-    if (allTexts.length === 0) return;
+    const metadata = this.getDocumentMetadata();
+    if (!metadata || !this.layerStack || metadata.texts.length === 0) return;
 
     const layerMap = buildLayerMap(this.layerStack);
-    const dbToUm = this.gdsDocument.units.database / 1e-6;
+    const dbToUm = metadata.units.database / 1e-6;
     const unitScale = getUnitScale(this.layerStack.units ?? "um");
 
     try {
       const textLayerGroups = await textRenderer.renderTexts(
-        allTexts,
+        metadata.texts,
         layerMap,
         {
           dbToUm,
           unitScale,
           zScale: this.baseZScale,
-          documentBounds: this.gdsDocument.boundingBox,
+          documentBounds: metadata.boundingBox,
         },
       );
 
@@ -696,6 +897,22 @@ export class GdsViewer extends HTMLElement {
         ? "WebGPU"
         : "WebGL"
       : "Initializing...";
+    const statusHtml = this.loadPhase
+      ? `<div style="margin-top:8px;font-size:11px;color:#ccc;">
+          <div>Status: ${this.loadPhase}</div>
+          <div>${this.loadStatusMessage || "Working..."}</div>
+          <div>${this.loadProgress}%</div>
+        </div>`
+      : "";
+    const complexityHtml = this.lastGeometryStats
+      ? `<div style="margin-top:8px;font-size:11px;color:#888;">
+          Polygons: ${this.lastGeometryStats.polygonCount.toLocaleString()}<br>
+          Points: ${this.lastGeometryStats.pointCount.toLocaleString()}<br>
+          Mode: ${this.lastGeometryStats.chosenMode === "flat" ? "2D-first" : "3D"}<br>
+          Deferred layers: ${this.deferredRenderKeys.size}<br>
+          Policy: ${this.lastGeometryStats.modeReason}${this.lastGeometryStats.exceedsHardLimit ? " (3D guarded)" : ""}
+        </div>`
+      : "";
 
     this.controlsPanel.innerHTML = `
       <div style="margin-bottom:8px"><strong>View Controls</strong></div>
@@ -717,6 +934,8 @@ export class GdsViewer extends HTMLElement {
       <div style="margin-top:8px;font-size:11px;color:#888;">
         Renderer: ${backendLabel}
       </div>
+      ${complexityHtml}
+      ${statusHtml}
     `;
 
     const slider = this.controlsPanel.querySelector(
@@ -841,13 +1060,14 @@ export class GdsViewer extends HTMLElement {
   }
 
 	  private updateChipBackdropBounds() {
-    if (!this.gdsDocument) {
+    const metadata = this.getDocumentMetadata();
+    if (!metadata) {
       this.chipBackdrop.visible = false;
       return;
     }
 
-    const dbToUm = this.gdsDocument.units.database / 1e-6;
-    const bounds = this.gdsDocument.boundingBox;
+    const dbToUm = metadata.units.database / 1e-6;
+    const bounds = metadata.boundingBox;
     const minX = bounds.minX * dbToUm;
     const maxX = bounds.maxX * dbToUm;
     const minY = bounds.minY * dbToUm;
@@ -874,15 +1094,44 @@ export class GdsViewer extends HTMLElement {
 	    classification: ReturnType<typeof classifyLayer>;
 	    isTextLayer: boolean;
 	  }> {
-	    if (!this.gdsDocument || !this.layerStack) return [];
+	    if (!this.layerStack) return [];
+      if (this.standardRenderEntries.length === 0) {
+        const usedKeys = new Set<string>();
+        const uniqueKey = (base: string) => {
+          if (!usedKeys.has(base)) {
+            usedKeys.add(base);
+            return base;
+          }
+          let i = 2;
+          while (usedKeys.has(`${base}#${i}`)) i++;
+          const key = `${base}#${i}`;
+          usedKeys.add(key);
+          return key;
+        };
 
+        return this.layerStack.layers.map((entry) => {
+          const sourceLayer = entry.source?.layer ?? entry.layer;
+          const sourceDatatype = entry.source?.datatype ?? entry.datatype;
+          const sourceKey = `${sourceLayer}:${sourceDatatype}`;
+          const renderKey = uniqueKey((entry.id && entry.id.trim()) || sourceKey);
+          const name = entry.name ?? renderKey;
+          const classification = classifyLayer(entry.layer, entry.datatype, name);
+          return {
+            renderKey,
+            sourceKey,
+            name,
+            zOffset: entry.zOffset,
+            color: entry.color,
+            stackEntry: entry,
+            classification,
+            isTextLayer: false,
+          };
+        });
+      }
+
+	    const stackEntryByRenderKey = new Map<string, LayerStackEntry>();
 	    const usedKeys = new Set<string>();
-	    const entriesBySource = new Map<
-	      string,
-	      Array<{ renderKey: string; entry: LayerStackEntry }>
-	    >();
-
-	    function uniqueKey(base: string): string {
+	    const uniqueKey = (base: string) => {
 	      if (!usedKeys.has(base)) {
 	        usedKeys.add(base);
 	        return base;
@@ -892,128 +1141,30 @@ export class GdsViewer extends HTMLElement {
 	      const key = `${base}#${i}`;
 	      usedKeys.add(key);
 	      return key;
-	    }
-
+	    };
 	    for (const entry of this.layerStack.layers) {
 	      const sourceLayer = entry.source?.layer ?? entry.layer;
 	      const sourceDatatype = entry.source?.datatype ?? entry.datatype;
 	      const sourceKey = `${sourceLayer}:${sourceDatatype}`;
-	      const baseRenderKey = (entry.id && entry.id.trim()) || sourceKey;
-	      const renderKey = uniqueKey(baseRenderKey);
-	      const list = entriesBySource.get(sourceKey) ?? [];
-	      list.push({ renderKey, entry });
-	      entriesBySource.set(sourceKey, list);
+	      const renderKey = uniqueKey((entry.id && entry.id.trim()) || sourceKey);
+	      stackEntryByRenderKey.set(renderKey, entry);
 	    }
 
-	    const defaultThickness = this.layerStack.defaultThickness ?? 0.1;
-	    let maxConfiguredZOffset = -defaultThickness * 1.1;
-	    for (const entry of this.layerStack.layers) {
-	      if (entry.zOffset > maxConfiguredZOffset) {
-	        maxConfiguredZOffset = entry.zOffset;
-	      }
-	    }
-	    let nextFallbackZOffset = maxConfiguredZOffset + defaultThickness * 1.1;
-
-		    const results: Array<{
-		      renderKey: string;
-		      sourceKey: string;
-		      name: string;
-	      zOffset: number;
-	      color: string;
-	      stackEntry: LayerStackEntry | null;
-	      classification: ReturnType<typeof classifyLayer>;
-		      isTextLayer: boolean;
-		    }> = [];
-		    const seenSourceKeys = new Set<string>();
-
-		    for (const [sourceKey, layer] of this.gdsDocument.layers) {
-		      seenSourceKeys.add(sourceKey);
-		      const renderEntries = entriesBySource.get(sourceKey);
-		      const hasTexts = this.textLayerGroups.has(sourceKey);
-
-	      if (renderEntries && renderEntries.length > 0) {
-	        const hasSourceKeyEntry = renderEntries.some(
-	          (item) => item.renderKey === sourceKey,
-	        );
-	        const layerName = layer.name ?? sourceKey;
-	        let maxZ = -Infinity;
-
-	        for (const { renderKey, entry } of renderEntries) {
-	          const name = entry.name ?? layerName;
-	          const classification = classifyLayer(layer.layer, layer.datatype, name);
-	          results.push({
-	            renderKey,
-	            sourceKey,
-	            name,
-	            zOffset: entry.zOffset,
-	            color: entry.color,
-	            stackEntry: entry,
-	            classification,
-	            isTextLayer: hasTexts && hasSourceKeyEntry && renderKey === sourceKey,
-	          });
-	          maxZ = Math.max(maxZ, entry.zOffset);
-	        }
-
-	        if (hasTexts && !hasSourceKeyEntry) {
-	          const textClassification =
-	            this.textLayerGroups.get(sourceKey)?.classification ??
-	            classifyLayer(layer.layer, layer.datatype, `${layerName} (Text)`);
-	          results.push({
-	            renderKey: sourceKey,
-	            sourceKey,
-	            name: `${layerName} (Text)`,
-	            zOffset: Number.isFinite(maxZ) ? maxZ + 1e-6 : 0,
-	            color: "#4a4a8a",
-	            stackEntry: null,
-	            classification: textClassification,
-	            isTextLayer: true,
-	          });
-	        }
-
-	        continue;
-	      }
-
-	      const name = layer.name ?? sourceKey;
-	      const classification = classifyLayer(layer.layer, layer.datatype, name);
-	      const color =
-	        layer.color ||
-	        (classification.isAnnotation ? "#333333" : getTypeColor(classification.type));
-	      results.push({
-	        renderKey: sourceKey,
-	        sourceKey,
-	        name,
-	        zOffset: nextFallbackZOffset,
-	        color,
-	        stackEntry: null,
-	        classification,
-	        isTextLayer: hasTexts,
-	      });
-		      nextFallbackZOffset += defaultThickness * 1.1;
-		    }
-
-		    for (const [sourceKey, renderEntries] of entriesBySource) {
-		      if (seenSourceKeys.has(sourceKey)) continue;
-		      const [layerStr, datatypeStr] = sourceKey.split(":");
-		      const layerNum = parseInt(layerStr ?? "0", 10);
-		      const datatypeNum = parseInt(datatypeStr ?? "0", 10);
-
-		      for (const { renderKey, entry } of renderEntries) {
-		        const name = entry.name ?? renderKey;
-		        const classification = classifyLayer(layerNum, datatypeNum, name);
-		        results.push({
-		          renderKey,
-		          sourceKey,
-		          name,
-		          zOffset: entry.zOffset,
-		          color: entry.color,
-		          stackEntry: entry,
-		          classification,
-		          isTextLayer: false,
-		        });
-		      }
-		    }
-
-		    return results;
+	    return this.standardRenderEntries.map((entry) => ({
+	      renderKey: entry.renderKey,
+	      sourceKey: entry.sourceKey,
+	      name: this.standardTextLayerKeys.has(entry.sourceKey) && !this.buildableRenderKeys.has(entry.renderKey)
+	        ? `${entry.name} (Text)`
+	        : entry.name,
+	      zOffset: entry.zOffset,
+	      color:
+	        this.standardTextLayerKeys.has(entry.sourceKey) && !this.buildableRenderKeys.has(entry.renderKey)
+	          ? "#4a4a8a"
+	          : entry.color || getTypeColor(entry.layerType),
+	      stackEntry: stackEntryByRenderKey.get(entry.renderKey) ?? null,
+	      classification: classifyLayer(entry.layer, entry.datatype, entry.name),
+	      isTextLayer: this.standardTextLayerKeys.has(entry.sourceKey),
+	    }));
 		  }
 
 	  private applyLayerVisibility() {
@@ -1064,7 +1215,7 @@ export class GdsViewer extends HTMLElement {
 	  }
 
 	  private updateLayerPanel() {
-	    if (!this.gdsDocument || !this.layerStack) {
+	    if (!this.hasLoadedGdsData() || !this.layerStack) {
       this.layerPanel.innerHTML = this.renderLayerPanelShell(
         "<div>No data</div>",
       );
@@ -1307,6 +1458,15 @@ export class GdsViewer extends HTMLElement {
         }
       });
     }
+
+    if (
+      visible &&
+      !this.derivedSchema &&
+      this.deferredRenderKeys.has(layerKey) &&
+      this.buildableRenderKeys.has(layerKey)
+    ) {
+      void this.ensureStandardLayerBuilt(layerKey);
+    }
   }
 
   private setupLights() {}
@@ -1457,6 +1617,24 @@ export class GdsViewer extends HTMLElement {
 
   private toggle2DMode() {
     this.is2DMode = !this.is2DMode;
+    const shouldGuard3D =
+      !this.is2DMode &&
+      !this.derivedSchema &&
+      this.lastGeometryStats?.exceedsHardLimit === true;
+    const nextFlatGeometryActive =
+      !this.derivedSchema && (this.is2DMode || shouldGuard3D);
+    const shouldSwitchFlatMode =
+      !this.derivedSchema &&
+      this.flatGeometryActive !== nextFlatGeometryActive;
+    if (shouldSwitchFlatMode) {
+      this.flatGeometryActive = nextFlatGeometryActive;
+      if (this.hasLoadedGdsData() && this.layerStack) {
+        void this.buildAndRenderModel();
+      }
+    }
+    if (shouldGuard3D) {
+      this.updateLoadState("ready", 100, "3D extrusion is disabled for this layout size; showing flat geometry.");
+    }
 
     const currentTarget = this.controls.target.clone();
 
@@ -1657,43 +1835,32 @@ export class GdsViewer extends HTMLElement {
 
   async loadGdsFile(file: File): Promise<void> {
     const buffer = await file.arrayBuffer();
-    this.gdsDocument = await parseGDSII(buffer);
     this.lypResult = null;
     this.derivedSchema = null;
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
-    this.layerStack = this.createDefaultLayerStack();
-    await this.buildAndRenderModel();
+    await this.loadStandardGdsBuild(buffer, null);
   }
 
   async loadGdsAndLypFiles(gdsFile: File, lypFile: File): Promise<void> {
-    const gdsPromise = gdsFile
-      .arrayBuffer()
-      .then((buffer) => parseGDSII(buffer));
-    const lypPromise = loadLypFromFileInWorker(lypFile);
-
-    const [gdsDocument, lypResult] = await Promise.all([
-      gdsPromise,
-      lypPromise,
+    const [buffer, lypResult] = await Promise.all([
+      gdsFile.arrayBuffer(),
+      loadLypFromFileInWorker(lypFile),
     ]);
 
-    this.gdsDocument = gdsDocument;
     this.lypResult = lypResult;
     this.derivedSchema = null;
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
-    this.layerStack = this.createLayerStackFromLyp(lypResult);
-    await this.buildAndRenderModel();
+    await this.loadStandardGdsBuild(buffer, this.createLayerStackFromLyp(lypResult));
   }
 
   async loadGdsBuffer(buffer: ArrayBuffer): Promise<void> {
-    this.gdsDocument = await parseGDSII(buffer);
     this.lypResult = null;
     this.derivedSchema = null;
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
-    this.layerStack = this.createDefaultLayerStack();
-    await this.buildAndRenderModel();
+    await this.loadStandardGdsBuild(buffer, null);
   }
 
   setLayerStack(config: LayerStackConfig): void {
@@ -1702,7 +1869,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = config;
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       void this.buildAndRenderModel();
     }
   }
@@ -1713,7 +1881,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromProcessStack(config);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       void this.buildAndRenderModel();
     }
   }
@@ -1722,7 +1891,7 @@ export class GdsViewer extends HTMLElement {
     this.lypResult = null;
     this.derivedSchema = config;
     this.layerStack = this.createLayerStackFromDerivedGeometry(config);
-    if (this.gdsDocument) {
+    if (this.hasLoadedGdsData()) {
       void this.buildAndRenderModel();
     }
   }
@@ -1733,7 +1902,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromLyp(this.lypResult);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1744,7 +1914,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromLyp(this.lypResult);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1755,7 +1926,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromLyp(this.lypResult);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1763,7 +1935,7 @@ export class GdsViewer extends HTMLElement {
   async loadDerivedGeometryFromUrl(url: string): Promise<void> {
     const derived = await fetch(url).then((r) => r.json());
     this.layerStack = this.createLayerStackFromDerivedGeometry(derived);
-    if (this.gdsDocument) {
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1771,7 +1943,7 @@ export class GdsViewer extends HTMLElement {
   async loadDerivedGeometryFromString(jsonString: string): Promise<void> {
     const derived = JSON.parse(jsonString) as unknown;
     this.layerStack = this.createLayerStackFromDerivedGeometry(derived);
-    if (this.gdsDocument) {
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1782,7 +1954,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromProcessStack(processStack);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1793,7 +1966,8 @@ export class GdsViewer extends HTMLElement {
     this.derivedUiGroups = null;
     this.derivedWarnings = [];
     this.layerStack = this.createLayerStackFromProcessStack(processStack);
-    if (this.gdsDocument) {
+    this.resetStandardGeometryCaches();
+    if (this.hasLoadedGdsData()) {
       await this.buildAndRenderModel();
     }
   }
@@ -1802,15 +1976,15 @@ export class GdsViewer extends HTMLElement {
     buffer: ArrayBuffer,
     _filename?: string,
   ): Promise<void> {
-    this.gdsDocument = await parseGDSII(buffer);
-    if (!this.layerStack) {
-      this.layerStack = this.createDefaultLayerStack();
-    }
-    await this.buildAndRenderModel();
+    await this.loadStandardGdsBuild(buffer, this.layerStack);
   }
 
   getDocument(): GDSDocument | null {
     return this.gdsDocument;
+  }
+
+  async getDocumentAsync(): Promise<GDSDocument | null> {
+    return this.ensureFullDocument();
   }
 
   getLayerStack(): LayerStackConfig | null {

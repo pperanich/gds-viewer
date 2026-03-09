@@ -1,6 +1,11 @@
 export { GdsViewer } from "./lib/GdsViewer";
-export { parseGDSII } from "./lib/GDSParser";
+export { parseAndBuildGDS, parseGDSII } from "./lib/GDSParser";
 export { buildGeometry, buildGeometryAsync } from "./lib/GeometryBuilder";
+export type { GeometryLayerPayload } from "./lib/GeometryCommon";
+export type {
+  GeometryComplexityStats,
+  GeometryRenderEntryInfo,
+} from "./lib/GeometryPayloadBuilder";
 export {
   classifyLayer,
   shouldRenderLayer,
@@ -18,7 +23,7 @@ export {
   derivedGeometryToLayerStack,
   isDerivedGeometrySchema,
 } from "./lib/DerivedGeometry";
-export { buildDerivedModel } from "./lib/DerivedGeometryModel";
+export { buildDerivedModel, buildDerivedModelAsync } from "./lib/DerivedGeometryModel";
 export { processStackToLayerStack } from "./lib/ProcessStack";
 export {
   loadLypFromUrlInWorker,
@@ -26,6 +31,11 @@ export {
   parseLypFileInWorker,
 } from "./lib/LypWorkerClient";
 export type { LypLayerProperties, LypParseResult } from "./lib/LypParser";
+export type {
+  LoadProgressCallback,
+  GDSBuildArtifact,
+  GDSDocumentMetadata,
+} from "./lib/GDSParser";
 export type {
   GDSDocument,
   Cell,

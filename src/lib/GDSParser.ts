@@ -4,12 +4,19 @@ import type {
   Cell,
   GDSDocument,
   Layer,
+  LayerStackConfig,
   Point,
   Polygon,
   TextElement,
 } from "../types/gds";
 import { pathToPolygon } from "./pathToPolygon";
 import GDSWorker from "./gds.worker.ts?worker&inline";
+import type { GeometryLayerPayload } from "./GeometryCommon";
+import type {
+  GeometryComplexityStats,
+  GeometryPayloadBuildOptions,
+  GeometryRenderEntryInfo,
+} from "./GeometryPayloadBuilder";
 
 const BGNEXTN = 12291;
 const ENDEXTN = 12547;
@@ -102,6 +109,20 @@ function trimTrailingPadding(buffer: ArrayBuffer): ArrayBuffer {
 }
 
 export type ParseProgressCallback = (progress: number, message: string) => void;
+export type LoadProgressCallback = (
+  progress: number,
+  message: string,
+  phase?: string,
+) => void;
+
+export interface GDSDocumentMetadata {
+  name: string;
+  layers: [string, Layer][];
+  topCells: string[];
+  boundingBox: BoundingBox;
+  units: { database: number; user: number };
+  texts: TextElement[];
+}
 
 function* parseGDSWithDeprecatedRecords(
   fileData: Uint8Array
@@ -252,6 +273,22 @@ function deserializeDocument(data: {
   };
 }
 
+export function createDocumentMetadata(document: GDSDocument): GDSDocumentMetadata {
+  const texts: TextElement[] = [];
+  for (const cell of document.cells.values()) {
+    texts.push(...cell.texts);
+  }
+
+  return {
+    name: document.name,
+    layers: Array.from(document.layers.entries()),
+    topCells: document.topCells,
+    boundingBox: document.boundingBox,
+    units: document.units,
+    texts,
+  };
+}
+
 export async function parseGDSII(
   fileBuffer: ArrayBuffer,
   onProgress?: ParseProgressCallback
@@ -279,6 +316,97 @@ export async function parseGDSII(
     };
     
     worker.postMessage({ type: "parse", buffer: fileBuffer }, [fileBuffer]);
+  });
+}
+
+export interface GDSBuildArtifact {
+  metadata: GDSDocumentMetadata;
+  layerStack: LayerStackConfig;
+  layers: GeometryLayerPayload[];
+  stats: GeometryComplexityStats;
+  renderEntries: GeometryRenderEntryInfo[];
+  buildableRenderKeys: string[];
+  deferredRenderKeys: string[];
+}
+
+export async function parseAndBuildGDS(
+  fileBuffer: ArrayBuffer,
+  layerStack: LayerStackConfig | null,
+  options: GeometryPayloadBuildOptions = {},
+  onProgress?: LoadProgressCallback,
+): Promise<GDSBuildArtifact> {
+  return new Promise((resolve, reject) => {
+    const worker = new GDSWorker();
+
+    worker.onmessage = (e: MessageEvent) => {
+      const {
+        type,
+        progress,
+        message,
+        phase,
+        metadata,
+        layers,
+        stats,
+        error,
+        layerStack: builtLayerStack,
+        renderEntries,
+        buildableRenderKeys,
+        deferredRenderKeys,
+      } =
+        e.data as {
+          type: string;
+          progress?: number;
+          message?: string;
+          phase?: string;
+          metadata?: GDSDocumentMetadata;
+          layers?: GeometryLayerPayload[];
+          stats?: GeometryComplexityStats;
+          error?: string;
+          layerStack?: LayerStackConfig;
+          renderEntries?: GeometryRenderEntryInfo[];
+          buildableRenderKeys?: string[];
+          deferredRenderKeys?: string[];
+        };
+
+      if (type === "progress" && progress !== undefined && message) {
+        onProgress?.(progress, message, phase);
+      } else if (
+        type === "complete-build" &&
+        metadata &&
+        layers &&
+        stats &&
+        builtLayerStack &&
+        renderEntries &&
+        buildableRenderKeys &&
+        deferredRenderKeys
+      ) {
+        worker.terminate();
+        resolve({
+          metadata,
+          layerStack: builtLayerStack,
+          layers,
+          stats,
+          renderEntries,
+          buildableRenderKeys,
+          deferredRenderKeys,
+        });
+      } else if (type === "error") {
+        worker.terminate();
+        reject(new Error(error ?? "Unknown worker error"));
+      }
+    };
+
+    worker.onerror = (e: ErrorEvent) => {
+      worker.terminate();
+      reject(new Error(`Worker error: ${e.message}`));
+    };
+
+    worker.postMessage({
+      type: "parse-and-build",
+      buffer: fileBuffer,
+      layerStack,
+      options,
+    }, [fileBuffer]);
   });
 }
 

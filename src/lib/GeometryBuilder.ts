@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import earcut from "earcut";
 import GeometryWorker from "./geometry.worker.ts?worker&inline";
+import { getUnitScale, type GeometryLayerPayload } from "./GeometryCommon";
+import { buildGeometryPayload } from "./GeometryPayloadBuilder";
 import type {
   GDSDocument,
   Polygon,
@@ -13,29 +15,11 @@ import { serializeGDSDocument } from "./gdsSerialization";
 
 export interface BuildGeometryOptions {
   zScale?: number;
+  flatMode?: boolean;
+  flatModeThresholdBytes?: number;
 }
 
-export interface GeometryLayerPayload {
-  layerKey: string;
-  layer: number;
-  datatype: number;
-  layerType: string;
-  lypTransparent: boolean;
-  lypOutline: boolean;
-  lypDitherPattern?: string;
-  lypWidth?: number;
-  lypXfill?: boolean;
-  defaultVisible: boolean;
-  color: string;
-  opacity: number;
-  isTransparent: boolean;
-  renderOrder: number;
-  polygonOffsetFactor: number;
-  polygonOffsetUnits: number;
-  positions: Float32Array;
-  normals: Float32Array;
-  indices: Uint32Array;
-}
+export type { GeometryLayerPayload } from "./GeometryCommon";
 
 interface LayerBuildData {
   geometries: THREE.BufferGeometry[];
@@ -54,6 +38,16 @@ export function buildGeometry(
   layerStack: LayerStackConfig,
   options: BuildGeometryOptions = {}
 ): THREE.Group {
+  if (options.flatMode || options.flatModeThresholdBytes !== undefined) {
+    return buildGeometryFromPayload(
+      buildGeometryPayload(document, layerStack, {
+        zScale: options.zScale,
+        mode: options.flatMode ? "flat" : "auto",
+        flatModeThresholdBytes: options.flatModeThresholdBytes,
+      }).layers,
+    );
+  }
+
   const root = new THREE.Group();
   const entriesBySourceKey = buildEntriesBySourceKey(layerStack);
   const unitScale = getUnitScale(layerStack.units ?? "um");
@@ -266,12 +260,16 @@ export async function buildGeometryAsync(
       type: "build",
       document: serialized,
       layerStack,
-      options,
+      options: {
+        zScale: options.zScale,
+        mode: options.flatMode ? "flat" : "auto",
+        flatModeThresholdBytes: options.flatModeThresholdBytes,
+      },
     });
   });
 }
 
-function buildGeometryFromPayload(layers: GeometryLayerPayload[]): THREE.Group {
+export function buildGeometryFromPayload(layers: GeometryLayerPayload[]): THREE.Group {
   const root = new THREE.Group();
 
   for (const layer of layers) {
@@ -366,18 +364,6 @@ function buildEntriesBySourceKey(
   }
 
   return bySource;
-}
-
-export function getUnitScale(units: string): number {
-  switch (units) {
-    case "nm":
-      return 0.001;
-    case "mm":
-      return 1000;
-    case "um":
-    default:
-      return 1;
-  }
 }
 
 function createExtrudedGeometry(

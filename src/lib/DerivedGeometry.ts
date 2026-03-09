@@ -28,21 +28,27 @@ function resolveMaskCadId(
       warnings.push(`Mask ref cycle detected: ${ref}`);
       return null;
     }
-    visitedRefs.add(ref);
     const resolved = schema.masks?.[ref];
     if (!resolved) {
       warnings.push(`Unknown mask ref "${ref}"`);
       return null;
     }
-    return resolveMaskCadId(resolved, schema, warnings, visitedRefs);
+    const nextVisited = new Set(visitedRefs);
+    nextVisited.add(ref);
+    return resolveMaskCadId(resolved, schema, warnings, nextVisited);
   }
   if ("op" in mask && mask.op === "not" && "arg" in mask) {
-    return resolveMaskCadId(mask.arg as DerivedGeometryMask, schema, warnings, visitedRefs);
+    return resolveMaskCadId(
+      mask.arg as DerivedGeometryMask,
+      schema,
+      warnings,
+      new Set(visitedRefs),
+    );
   }
   if ("op" in mask && (mask.op === "and" || mask.op === "or") && "args" in mask) {
     const args = mask.args as DerivedGeometryMask[];
     for (const a of args) {
-      const cad = resolveMaskCadId(a, schema, warnings, visitedRefs);
+      const cad = resolveMaskCadId(a, schema, warnings, new Set(visitedRefs));
       if (cad) return cad;
     }
     return null;

@@ -258,7 +258,7 @@ interface ProcessStackLayer {
 
 `DerivedGeometrySchema` describes a process-style stack (base slabs + deposit/etch steps) and compiles to renderable `LayerStackConfig` entries. Example: `examples/derived-geometry.sample.json`.
 
-Note: derived-geometry currently supports **base slabs**, **deposit steps** (including multiple stacked films on the same CAD layer), and **etch steps** on both die-area and mask-patterned solids using polygon boolean operations (union/intersection/difference). `mask.alignment` can be visualized as an **overlay envelope** using `derived-geometry-overlay-mode` (implemented via polygon offsetting). Masks can also be composed via `schema.masks` and `and/or/not/ref` expressions in step masks.
+Note: derived-geometry is compiled from the GDS document using a worker-backed process compiler. It currently supports **base slabs**, **deposit steps** (including multiple stacked films on the same CAD layer), and **etch steps** on both die-area and mask-patterned solids using polygon boolean operations (union/intersection/difference). Etches now respect stacked same-material intervals and `stopOn.material` as a vertical stop condition. `renderSolids.from.steps` includes descendants of selected steps after etch/split operations. `mask.alignment` can be visualized as an **overlay envelope** using `derived-geometry-overlay-mode` (implemented via polygon offsetting). Masks can also be composed via `schema.masks` and `and/or/not/ref` expressions in step masks. `sidewallAngleDeg` is currently parsed but only reported as ignored; sloped sidewalls are not yet modeled.
 
 Precedence when URL attributes are provided:
 1. `lyp-url`

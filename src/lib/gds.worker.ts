@@ -5,11 +5,13 @@ import type {
   Cell,
   GDSDocument,
   Layer,
+  LayerStackConfig,
   Point,
   Polygon,
   TextElement,
 } from "../types/gds";
 import { pathToPolygon } from "./pathToPolygon";
+import { buildGeometryPayload, createDefaultLayerStack, type GeometryPayloadBuildOptions } from "./GeometryPayloadBuilder";
 
 const BGNEXTN = 12291;
 const ENDEXTN = 12547;
@@ -232,8 +234,12 @@ function parseReal8(dataView: DataView, offset: number): number {
   return base * sign * 16 ** exponent;
 }
 
-function reportProgress(progress: number, message: string) {
-  self.postMessage({ type: "progress", progress, message });
+function reportProgress(
+  progress: number,
+  message: string,
+  phase: string = "parsing-gds",
+) {
+  self.postMessage({ type: "progress", progress, message, phase });
 }
 
 function parseGDSII(fileBuffer: ArrayBuffer): GDSDocument {
@@ -637,14 +643,72 @@ function serializeDocument(doc: GDSDocument): unknown {
   };
 }
 
+function createDocumentMetadata(doc: GDSDocument) {
+  const texts: TextElement[] = [];
+  for (const cell of doc.cells.values()) {
+    texts.push(...cell.texts);
+  }
+
+  return {
+    name: doc.name,
+    layers: Array.from(doc.layers.entries()),
+    topCells: doc.topCells,
+    boundingBox: doc.boundingBox,
+    units: doc.units,
+    texts,
+  };
+}
+
 // Handle messages from main thread
 self.onmessage = (e: MessageEvent) => {
-  const { type, buffer } = e.data;
+  const { type, buffer, layerStack, options } = e.data as {
+    type: string;
+    buffer: ArrayBuffer;
+    layerStack?: LayerStackConfig | null;
+    options?: GeometryPayloadBuildOptions;
+  };
   
   if (type === "parse") {
     try {
       const document = parseGDSII(buffer);
       self.postMessage({ type: "complete", document: serializeDocument(document) });
+    } catch (error) {
+      self.postMessage({ type: "error", error: (error as Error).message });
+    }
+    return;
+  }
+
+  if (type === "parse-and-build") {
+    try {
+      const document = parseGDSII(buffer);
+      const effectiveLayerStack = layerStack ?? createDefaultLayerStack(document);
+      reportProgress(55, "Building geometry payloads...", "building-geometry");
+      const result = buildGeometryPayload(document, effectiveLayerStack, {
+        ...options,
+        progressBase: 55,
+        progressSpan: 40,
+        onProgress: (progress, message, phase) =>
+          reportProgress(progress, message, phase ?? "building-geometry"),
+      });
+
+      const transferables: Transferable[] = [];
+      for (const payload of result.layers) {
+        transferables.push(payload.positions.buffer, payload.normals.buffer, payload.indices.buffer);
+      }
+
+      self.postMessage(
+        {
+          type: "complete-build",
+          metadata: createDocumentMetadata(document),
+          layerStack: result.layerStack,
+          layers: result.layers,
+          stats: result.stats,
+          renderEntries: result.renderEntries,
+          buildableRenderKeys: result.buildableRenderKeys,
+          deferredRenderKeys: result.deferredRenderKeys,
+        },
+        transferables,
+      );
     } catch (error) {
       self.postMessage({ type: "error", error: (error as Error).message });
     }
