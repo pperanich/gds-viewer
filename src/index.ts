@@ -3,57 +3,60 @@ export { parseAndBuildGDS, parseGDSII } from "./lib/GDSParser";
 export { buildGeometry, buildGeometryAsync } from "./lib/GeometryBuilder";
 export type { GeometryLayerPayload } from "./lib/GeometryCommon";
 export type {
-  GeometryComplexityStats,
-  GeometryRenderEntryInfo,
+	GeometryComplexityStats,
+	GeometryRenderEntryInfo,
 } from "./lib/GeometryPayloadBuilder";
 export {
-  classifyLayer,
-  shouldRenderLayer,
-  parseLayerName,
-  getTypeColor,
+	classifyLayer,
+	shouldRenderLayer,
+	parseLayerName,
+	getTypeColor,
 } from "./lib/LayerClassifier";
 export type { LayerType, LayerClassification } from "./lib/LayerClassifier";
 export {
-  parseLypFile,
-  lypToLayerStack,
-  loadLypFromUrl,
-  loadLypFromFile,
+	parseLypFile,
+	lypToLayerStack,
+	loadLypFromUrl,
+	loadLypFromFile,
 } from "./lib/LypParser";
 export {
-  derivedGeometryToLayerStack,
-  isDerivedGeometrySchema,
+	derivedGeometryToLayerStack,
+	isDerivedGeometrySchema,
 } from "./lib/DerivedGeometry";
-export { buildDerivedModel, buildDerivedModelAsync } from "./lib/DerivedGeometryModel";
+export {
+	buildDerivedModel,
+	buildDerivedModelAsync,
+} from "./lib/DerivedGeometryModel";
 export { processStackToLayerStack } from "./lib/ProcessStack";
 export {
-  loadLypFromUrlInWorker,
-  loadLypFromFileInWorker,
-  parseLypFileInWorker,
+	loadLypFromUrlInWorker,
+	loadLypFromFileInWorker,
+	parseLypFileInWorker,
 } from "./lib/LypWorkerClient";
 export type { LypLayerProperties, LypParseResult } from "./lib/LypParser";
 export type {
-  LoadProgressCallback,
-  GDSBuildArtifact,
-  GDSDocumentMetadata,
+	LoadProgressCallback,
+	GDSBuildArtifact,
+	GDSDocumentMetadata,
 } from "./lib/GDSParser";
 export type {
-  GDSDocument,
-  Cell,
-  Polygon,
-  Layer,
-  Point,
-  BoundingBox,
-  LayerStackConfig,
-  LayerStackEntry,
-  ProcessStackConfig,
-  ProcessStackLayer,
-  DerivedGeometrySchema,
-  DerivedGeometryCadLayer,
-  DerivedGeometryMaterial,
-  DerivedGeometryParam,
-  DerivedGeometryMask,
-  DerivedGeometryMaskRef,
-  DerivedGeometryAlignmentRule,
-  DerivedGeometryProcessStep,
-  DerivedGeometryOutputs,
+	GDSDocument,
+	Cell,
+	Polygon,
+	Layer,
+	Point,
+	BoundingBox,
+	LayerStackConfig,
+	LayerStackEntry,
+	ProcessStackConfig,
+	ProcessStackLayer,
+	DerivedGeometrySchema,
+	DerivedGeometryCadLayer,
+	DerivedGeometryMaterial,
+	DerivedGeometryParam,
+	DerivedGeometryMask,
+	DerivedGeometryMaskRef,
+	DerivedGeometryAlignmentRule,
+	DerivedGeometryProcessStep,
+	DerivedGeometryOutputs,
 } from "./types/gds";
