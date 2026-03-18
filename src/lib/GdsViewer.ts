@@ -84,6 +84,7 @@ export class GdsViewer extends HTMLElement {
 	private layerPanel: HTMLDivElement;
 	private controlsPanel: HTMLDivElement;
 	private layersCollapsed: boolean = false;
+	private controlsDiagnosticsExpanded: boolean = false;
 	private meshMaterialState = new WeakMap<
 		THREE.Mesh,
 		{
@@ -301,12 +302,19 @@ export class GdsViewer extends HTMLElement {
 		this.resourcesDisposed = true;
 		this.buildToken += 1;
 		this.rendererReady = false;
-		this.renderer.dispose();
-		this.controls.dispose();
-		this.gridOverlay.dispose();
-		this.chipBackdrop.geometry.dispose();
-		this.chipBackdropMaterial.dispose();
-		this.measurementTool.dispose();
+		const safeDispose = (label: string, dispose: () => void) => {
+			try {
+				dispose();
+			} catch (error) {
+				console.warn(`[gds-viewer] failed to dispose ${label}`, error);
+			}
+		};
+		safeDispose("renderer", () => this.renderer.dispose());
+		safeDispose("controls", () => this.controls.dispose());
+		safeDispose("grid overlay", () => this.gridOverlay.dispose());
+		safeDispose("chip backdrop geometry", () => this.chipBackdrop.geometry.dispose());
+		safeDispose("chip backdrop material", () => this.chipBackdropMaterial.dispose());
+		safeDispose("measurement tool", () => this.measurementTool.dispose());
 	}
 
 	attributeChangedCallback(name: string, _oldValue: string, _newValue: string) {
@@ -921,22 +929,42 @@ export class GdsViewer extends HTMLElement {
 				? "WebGPU"
 				: "WebGL"
 			: "Initializing...";
+		const statusLabel = this.loadPhase
+			? this.loadPhase
+					.split("-")
+					.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+					.join(" ")
+			: null;
+		const diagnosticsSummary = statusLabel
+			? `${statusLabel}${this.loadPhase === "ready" ? "" : ` ${this.loadProgress}%`}`
+			: backendLabel;
 		const statusHtml = this.loadPhase
-			? `<div style="margin-top:8px;font-size:11px;color:#ccc;">
-          <div>Status: ${this.loadPhase}</div>
-          <div>${this.loadStatusMessage || "Working..."}</div>
-          <div>${this.loadProgress}%</div>
-        </div>`
+			? `<div style="margin-top:8px;color:#ccc;">
+		          <div>Status: ${statusLabel}</div>
+		          <div>${this.loadStatusMessage || "Working..."}</div>
+		          <div>${this.loadProgress}%</div>
+		        </div>`
 			: "";
 		const complexityHtml = this.lastGeometryStats
-			? `<div style="margin-top:8px;font-size:11px;color:#888;">
-          Polygons: ${this.lastGeometryStats.polygonCount.toLocaleString()}<br>
-          Points: ${this.lastGeometryStats.pointCount.toLocaleString()}<br>
-          Mode: ${this.lastGeometryStats.chosenMode === "flat" ? "2D-first" : "3D"}<br>
-          Deferred layers: ${this.deferredRenderKeys.size}<br>
-          Policy: ${this.lastGeometryStats.modeReason}${this.lastGeometryStats.exceedsHardLimit ? " (3D guarded)" : ""}
-        </div>`
+			? `<div style="margin-top:8px;">
+		          <div>Polygons: ${this.lastGeometryStats.polygonCount.toLocaleString()}</div>
+		          <div>Points: ${this.lastGeometryStats.pointCount.toLocaleString()}</div>
+		          <div>Mode: ${this.lastGeometryStats.chosenMode === "flat" ? "2D-first" : "3D"}</div>
+		          <div>Deferred layers: ${this.deferredRenderKeys.size}</div>
+		          <div>Policy: ${this.lastGeometryStats.modeReason}${this.lastGeometryStats.exceedsHardLimit ? " (3D guarded)" : ""}</div>
+		        </div>`
 			: "";
+		const diagnosticsHtml = `
+		  <details data-control="diagnostics" style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.12);padding-top:8px;" ${this.controlsDiagnosticsExpanded ? "open" : ""}>
+		    <summary style="cursor:pointer;font-size:12px;color:#ddd;">
+		      Diagnostics <span style="color:#999;">(${diagnosticsSummary})</span>
+		    </summary>
+		    <div style="margin-top:8px;font-size:11px;color:#888;">
+		      <div>Renderer: ${backendLabel}</div>
+		      ${complexityHtml}
+		      ${statusHtml}
+		    </div>
+		  </details>`;
 
 		this.controlsPanel.innerHTML = `
       <div style="margin-bottom:8px"><strong>View Controls</strong></div>
@@ -955,11 +983,7 @@ export class GdsViewer extends HTMLElement {
           ${this.darkMode ? "Dark" : "Light"}
         </button>
       </label>
-      <div style="margin-top:8px;font-size:11px;color:#888;">
-        Renderer: ${backendLabel}
-      </div>
-      ${complexityHtml}
-      ${statusHtml}
+      ${diagnosticsHtml}
     `;
 
 		const slider = this.controlsPanel.querySelector(
@@ -994,6 +1018,14 @@ export class GdsViewer extends HTMLElement {
 		);
 		view2DBtn?.addEventListener("click", () => {
 			if (!this.is2DMode) this.toggle2DMode();
+		});
+
+		const diagnosticsDetails = this.controlsPanel.querySelector<HTMLDetailsElement>(
+			'details[data-control="diagnostics"]',
+		);
+		diagnosticsDetails?.addEventListener("toggle", () => {
+			this.controlsDiagnosticsExpanded = diagnosticsDetails.open;
+			this.updatePanelLayout();
 		});
 
 		this.updatePanelLayout();
