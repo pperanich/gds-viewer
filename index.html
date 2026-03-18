@@ -61,46 +61,12 @@
         display: flex;
         overflow: hidden;
       }
-      .sidebar {
-        width: 280px;
-        background: #fff;
-        border-right: 1px solid #ddd;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-      }
-      .sidebar-header {
-        padding: 12px 16px;
-        border-bottom: 1px solid #eee;
-        font-weight: 600;
-        font-size: 14px;
-        color: #666;
+      .intro-note {
+        padding: 10px 20px;
         background: #fafafa;
-      }
-      .file-list {
-        flex: 1;
-        overflow-y: auto;
-        padding: 8px 0;
-      }
-      .file-item {
-        padding: 10px 16px;
-        cursor: pointer;
-        font-size: 13px;
-        border-left: 3px solid transparent;
-        transition: all 0.15s ease;
-        word-break: break-word;
-      }
-      .file-item:hover {
-        background: #f0f0f5;
-      }
-      .file-item.active {
-        background: #e8e8f0;
-        border-left-color: #4a4a8a;
-        font-weight: 500;
-      }
-      .file-item.loading {
-        opacity: 0.6;
-        pointer-events: none;
+        border-bottom: 1px solid #ddd;
+        color: #666;
+        font-size: 14px;
       }
       .viewer-container {
         flex: 1;
@@ -179,21 +145,10 @@
               multiple
             />
           </label>
-          <button class="upload-btn" id="process-stack-btn" type="button" style="background:#2b7a4b;">
-            Use Sample Stack
-          </button>
-          <button class="upload-btn" id="derived-geometry-btn" type="button" style="background:#6b4b7a;">
-            Use Derived Geometry
-          </button>
         </div>
       </header>
+      <div class="intro-note">Load local GDS, LYP, process-stack, or derived-geometry JSON files.</div>
       <div class="main-content">
-        <div class="sidebar">
-          <div class="sidebar-header">Sample GDS Files</div>
-          <div class="file-list" id="file-list">
-            <div class="file-item" style="color: #999; font-style: italic;">Loading...</div>
-          </div>
-        </div>
         <div class="viewer-container">
           <gds-viewer id="viewer" lyp-layer-ordering="lyp-reverse"></gds-viewer>
           <div class="drop-zone" id="drop-zone">
@@ -214,134 +169,7 @@
       const pairInput = document.getElementById("pair-input");
       const dropZone = document.getElementById("drop-zone");
       const container = document.querySelector(".viewer-container");
-      const fileList = document.getElementById("file-list");
       const loadingIndicator = document.getElementById("loading-indicator");
-      const sidebar = document.querySelector(".sidebar");
-      const processStackBtn = document.getElementById("process-stack-btn");
-      const derivedGeometryBtn = document.getElementById("derived-geometry-btn");
-
-      function hideSidebar() {
-        sidebar.style.display = "none";
-      }
-
-      // GitHub raw content base URLs
-      const GITHUB_RAW_BASE = "/samples";
-      const GDS_API_URL = "/samples/gds/index.json";
-      const LYP_URL = `${GITHUB_RAW_BASE}/klayout/layers.lyp`;
-      const PROCESS_STACK_URL = "/examples/process-stack.sample.json";
-      const DERIVED_GEOMETRY_URL = "/examples/derived-geometry.sample.json";
-
-      let gdsFiles = [];
-      let currentFile = null;
-      let lypLoaded = false;
-
-      async function loadDefaultProcessStack() {
-        loadingIndicator.classList.add("active");
-        try {
-          await viewer.loadProcessStackFromUrl(PROCESS_STACK_URL);
-        } catch (err) {
-          console.warn("Could not load process stack:", err);
-          alert("Failed to load Sample process stack JSON.");
-        } finally {
-          loadingIndicator.classList.remove("active");
-        }
-      }
-
-      async function loadDefaultDerivedGeometry() {
-        loadingIndicator.classList.add("active");
-        try {
-          await viewer.loadDerivedGeometryFromUrl(DERIVED_GEOMETRY_URL);
-        } catch (err) {
-          console.warn("Could not load derived geometry:", err);
-          alert("Failed to load derived-geometry JSON.");
-        } finally {
-          loadingIndicator.classList.remove("active");
-        }
-      }
-
-      // Load LYP file once at startup
-      async function loadDefaultLyp() {
-        try {
-          const response = await fetch(LYP_URL);
-          if (!response.ok) throw new Error("Failed to fetch LYP");
-          const text = await response.text();
-          await viewer.loadLypFromString(text);
-          lypLoaded = true;
-        } catch (err) {
-          console.warn("Could not load default LYP:", err);
-        }
-      }
-
-      // Fetch list of GDS files from GitHub
-      async function fetchGdsFileList() {
-        try {
-          const response = await fetch(GDS_API_URL);
-          if (!response.ok) throw new Error("Failed to fetch file list");
-          const files = await response.json();
-          gdsFiles = files
-            .filter(f => f.name.endsWith(".gds"))
-            .map(f => ({
-              name: f.name,
-              url: f.download_url
-            }));
-          renderFileList();
-        } catch (err) {
-          fileList.innerHTML = `<div class="file-item" style="color: #c00;">Failed to load file list</div>`;
-          console.error("Error fetching GDS file list:", err);
-        }
-      }
-
-      // Render the file list in sidebar
-      function renderFileList() {
-        fileList.innerHTML = gdsFiles.map((file, idx) => `
-          <div class="file-item" data-idx="${idx}" title="${file.name}">
-            ${file.name.replace(".gds", "")}
-          </div>
-        `).join("");
-
-        // Add click handlers
-        fileList.querySelectorAll(".file-item").forEach(item => {
-          item.addEventListener("click", () => {
-            const idx = parseInt(item.dataset.idx, 10);
-            loadGdsFromUrl(gdsFiles[idx]);
-          });
-        });
-      }
-
-      // Load a GDS file from URL
-      async function loadGdsFromUrl(file) {
-        if (currentFile === file.url) return;
-
-        // Update UI
-        fileList.querySelectorAll(".file-item").forEach(el => {
-          el.classList.remove("active", "loading");
-        });
-        const activeItem = fileList.querySelector(`[data-idx="${gdsFiles.indexOf(file)}"]`);
-        if (activeItem) {
-          activeItem.classList.add("active", "loading");
-        }
-        loadingIndicator.classList.add("active");
-
-        try {
-          const response = await fetch(file.url);
-          if (!response.ok) throw new Error("Failed to fetch GDS file");
-          const arrayBuffer = await response.arrayBuffer();
-          await viewer.loadGdsFromArrayBuffer(arrayBuffer, file.name);
-          currentFile = file.url;
-        } catch (err) {
-          console.error("Error loading GDS file:", err);
-          alert(`Failed to load ${file.name}`);
-        } finally {
-          loadingIndicator.classList.remove("active");
-          if (activeItem) {
-            activeItem.classList.remove("loading");
-          }
-        }
-      }
-
-      // Initialize
-      loadDefaultLyp();
-      fetchGdsFileList();
 
       pairInput.addEventListener("change", async (e) => {
         const files = Array.from(e.target.files || []);
@@ -357,11 +185,6 @@
         );
 
         if (!gdsFile && !lypFile && !jsonFile) return;
-
-        if (gdsFile) {
-          hideSidebar();
-          currentFile = null;
-        }
 
         async function loadJsonConfig(file) {
           const text = await file.text();
@@ -385,7 +208,6 @@
         try {
           if (gdsFile && lypFile) {
             await viewer.loadGdsAndLypFiles(gdsFile, lypFile);
-            lypLoaded = true;
           } else if (gdsFile && jsonFile) {
             await viewer.loadGdsFile(gdsFile);
             await loadJsonConfig(jsonFile);
@@ -393,7 +215,6 @@
             await viewer.loadGdsFile(gdsFile);
           } else if (lypFile) {
             await viewer.loadLypFile(lypFile);
-            lypLoaded = true;
           } else if (jsonFile) {
             await loadJsonConfig(jsonFile);
           }
@@ -401,14 +222,6 @@
           loadingIndicator.classList.remove("active");
           pairInput.value = "";
         }
-      });
-
-      processStackBtn.addEventListener("click", () => {
-        void loadDefaultProcessStack();
-      });
-
-      derivedGeometryBtn.addEventListener("click", () => {
-        void loadDefaultDerivedGeometry();
       });
 
       container.addEventListener("dragover", (e) => {
@@ -427,8 +240,6 @@
         dropZone.classList.remove("active");
         const file = e.dataTransfer.files[0];
         if (file && (file.name.endsWith(".gds") || file.name.endsWith(".gdsii"))) {
-          hideSidebar();
-          currentFile = null;
           loadingIndicator.classList.add("active");
           try {
             await viewer.loadGdsFile(file);

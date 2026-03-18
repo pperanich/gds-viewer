@@ -1,13 +1,7 @@
 /**
  * Layer Classification System
  * 
- * Supports both photonics and CMOS PDK layer conventions based on analysis of:
- * - generic-photonics (Generic photonics)
- * - generic-photonics (Generic photonics)
- * - generic-cmos (Generic 180nm CMOS)
- * - generic-cmos (Generic 130nm CMOS)
- * - generic-bicmos (generic-bicmos 130nm BiCMOS)
- * - generic-photonics (VTT photonics)
+ * Supports common photonics and CMOS PDK layer naming conventions.
  */
 
 export type LayerType =
@@ -44,24 +38,24 @@ export interface LayerClassification {
  * Datatypes that indicate non-drawing purposes
  * Based on PDK analysis:
  * - 0: drawing (main geometry)
- * - 1: label (generic-bicmos)
- * - 2: pin (generic-bicmos)
+ * - 1: label
+ * - 2: pin
  * - 3: net/slot
  * - 4: boundary/dummy
  * - 5: marker/block
- * - 10: label (generic-cmos, generic-photonics)
- * - 11: pin alternate (generic-photonics)
+ * - 10: label
+ * - 11: pin alternate
  * - 12: pin alternate
- * - 16: pin (generic-cmos)
- * - 25: text (generic-bicmos)
+ * - 16: pin
+ * - 25: text
  */
 const ANNOTATION_DATATYPES = new Set([1, 2, 3, 4, 5, 10, 11, 12, 16, 25]);
 
 /**
  * Datatypes that specifically indicate drawing/geometry (not annotations)
  * - 0: standard drawing
- * - 20: drawing (generic-cmos, generic-bicmos)
- * - 44: drawing alternate (generic-cmos)
+ * - 20: drawing
+ * - 44: drawing alternate
  */
 const DRAWING_DATATYPES = new Set([0, 20, 44]);
 
@@ -149,7 +143,7 @@ const HEATER_NAME_PATTERNS = [
   /^TIN/i,
   /^M1_HEATER/i,
   /^M2_HEATER/i,
-  /^HR$/i,         // high resistance heater (VTT)
+  /^HR$/i,
 ];
 
 const TRENCH_NAME_PATTERNS = [
@@ -176,7 +170,7 @@ const WELL_NAME_PATTERNS = [
   /^WELL/i,
   /nwelldrawing/i,
   /pwelldrawing/i,
-  /^nBuLay/i,     // n-buried layer (generic-bicmos)
+  /^nBuLay/i,
 ];
 
 const ACTIVE_NAME_PATTERNS = [
@@ -204,7 +198,7 @@ const CONTACT_NAME_PATTERNS = [
   /^CONT$/i,
   /^CONT_/i,
   /^CONTACT$/i,
-  /^LICON/i,      // local interconnect contact (skywater)
+  /^LICON/i,
   /^MCON/i,       // metal contact
   /^NPC$/i,       // n+ poly contact
   /Contdrawing/i,
@@ -229,7 +223,7 @@ const METAL_NAME_PATTERNS = [
   /^MTOP/i,
   /^METALTOP/i,
   /ROUTER/i,
-  /^LI\d?$/i,     // local interconnect (skywater)
+  /^LI\d?$/i,
   /^LI\d?_/i,
   /Metal\ddrawing/i,
   /met\ddrawing/i,
@@ -254,7 +248,7 @@ const DOPING_NAME_PATTERNS = [
   /IMPLANT/i,
   /^SAB$/i,       // salicide block
   /^SALBLOCK/i,
-  /^NP_/i,        // generic-photonics n/p implant patterns
+  /^NP_/i,
 ];
 
 const RESISTOR_NAME_PATTERNS = [
@@ -320,7 +314,7 @@ export function parseLayerName(rawName: string): {
     };
   }
 
-  // Pattern: "namepurpose_m layer/datatype" (generic-cmos style)
+  // Pattern: "namepurpose_m layer/datatype"
   const match2 = rawName.match(/^(\w+?)([a-z]+)_m\s+(\d+)\/(\d+)$/i);
   if (match2) {
     return {
@@ -341,7 +335,7 @@ export function parseLayerName(rawName: string): {
     };
   }
 
-  // Pattern: "CATEGORY_TYPE_OPERATION" (generic-photonics style, e.g., "WG_RIBS_ADD")
+  // Pattern: "CATEGORY_TYPE_OPERATION" (e.g., "WG_RIBS_ADD")
   const match4 = rawName.match(/^(\w+?)_(ADD|SUB|CPY|DF|LF)$/i);
   if (match4) {
     return {
