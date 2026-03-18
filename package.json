@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "bunx --bun vite",
     "build": "bunx --bun vite build",
+    "build:pages": "bunx --bun vite build --config vite.pages.config.ts",
     "preview": "bunx --bun vite preview",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test"
