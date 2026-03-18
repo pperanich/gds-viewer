@@ -2,8 +2,6 @@
 
 A high-performance 3D GDS/GDSII file viewer built as a Web Component. Visualize semiconductor layouts and photonics designs directly in the browser with interactive 3D rendering, layer management, and measurement tools.
 
-![GDS Viewer Demo](https://img.shields.io/badge/demo-live-brightgreen)
-
 ## Features
 
 - **3D & 2D Visualization** - Interactive 3D rendering with orthographic 2D mode
@@ -16,21 +14,11 @@ A high-performance 3D GDS/GDSII file viewer built as a Web Component. Visualize 
 - **Theme Support** - Light and dark modes with customizable CSS variables
 - **Web Component** - Easy integration into any web application
 
-## Installation
-
-```bash
-npm install gds-viewer
-# or
-yarn add gds-viewer
-# or
-bun add gds-viewer
-```
-
 ## Quick Start
 
-### Direct Embedding (No Build Step)
+### Direct Embedding
 
-Download the latest `gds-viewer.js` from the [releases page](https://github.com/pperanich/gds-viewer/releases) and include it directly:
+Build `dist/gds-viewer.js` locally with `bun run build`, or use a release asset from the [releases page](https://github.com/pperanich/gds-viewer/releases), and include it directly:
 
 ```html
 <!DOCTYPE html>
@@ -40,27 +28,6 @@ Download the latest `gds-viewer.js` from the [releases page](https://github.com/
   </head>
   <body>
     <!-- Load from URL -->
-    <gds-viewer
-      gds-url="/path/to/design.gds"
-      lyp-url="/path/to/layers.lyp"
-      style="width: 100%; height: 600px;"
-    >
-    </gds-viewer>
-  </body>
-</html>
-```
-
-### Via NPM (For Build Tools)
-
-```html
-<!DOCTYPE html>
-<html>
-  <head>
-    <script type="module">
-      import "gds-viewer";
-    </script>
-  </head>
-  <body>
     <gds-viewer
       gds-url="/path/to/design.gds"
       lyp-url="/path/to/layers.lyp"
@@ -343,11 +310,11 @@ bun run typecheck
 
 ## Browser Support
 
-Requires WebGPU:
+`gds-viewer` targets modern browsers with WebGPU support and may fall back to WebGL through Three.js where supported.
 
-- Chrome/Edge 113+
-- Safari 17+
-- Firefox 139+ (behind `dom.webgpu.enabled` flag)
+- Chrome/Edge 113+ recommended
+- Safari 17+ recommended
+- Firefox support is experimental and may require `dom.webgpu.enabled`
 
 ## License
 
