@@ -5,14 +5,22 @@
 	"type": "module",
 	"main": "dist/gds-viewer.js",
 	"module": "dist/gds-viewer.js",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/gds-viewer.js",
+			"default": "./dist/gds-viewer.js"
+		}
+	},
 	"types": "dist/index.d.ts",
 	"files": [
 		"dist"
 	],
 	"scripts": {
 		"dev": "bunx --bun vite",
-		"build": "bunx --bun vite build",
+		"build": "vite build && tsc -p tsconfig.build.json",
 		"build:pages": "bunx --bun vite build --config vite.pages.config.ts",
+		"prepare": "npm run build",
 		"preview": "bunx --bun vite preview",
 		"typecheck": "bunx tsc --noEmit",
 		"test": "bun test"
