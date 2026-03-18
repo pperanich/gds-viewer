@@ -302,6 +302,9 @@ export class GdsViewer extends HTMLElement {
 		this.resourcesDisposed = true;
 		this.buildToken += 1;
 		this.rendererReady = false;
+		const rendererInternals = this.renderer as WebGPURenderer & {
+			_initialized?: boolean;
+		};
 		const safeDispose = (label: string, dispose: () => void) => {
 			try {
 				dispose();
@@ -309,12 +312,28 @@ export class GdsViewer extends HTMLElement {
 				console.warn(`[gds-viewer] failed to dispose ${label}`, error);
 			}
 		};
-		safeDispose("renderer", () => this.renderer.dispose());
+		if (this.modelGroup) {
+			const modelGroup = this.modelGroup;
+			this.scene.remove(modelGroup);
+			safeDispose("model group", () => this.disposeGroup(modelGroup));
+			this.modelGroup = null;
+		}
+		if (this.textGroup) {
+			const textGroup = this.textGroup;
+			this.scene.remove(textGroup);
+			safeDispose("text group", () => this.disposeGroup(textGroup));
+			this.textGroup = null;
+		}
 		safeDispose("controls", () => this.controls.dispose());
+		safeDispose("measurement tool", () => this.measurementTool.dispose());
 		safeDispose("grid overlay", () => this.gridOverlay.dispose());
+		this.scene.remove(this.gridOverlay.getObject());
+		this.scene.remove(this.chipBackdrop);
 		safeDispose("chip backdrop geometry", () => this.chipBackdrop.geometry.dispose());
 		safeDispose("chip backdrop material", () => this.chipBackdropMaterial.dispose());
-		safeDispose("measurement tool", () => this.measurementTool.dispose());
+		if (rendererInternals._initialized === true) {
+			safeDispose("renderer", () => this.renderer.dispose());
+		}
 	}
 
 	attributeChangedCallback(name: string, _oldValue: string, _newValue: string) {
